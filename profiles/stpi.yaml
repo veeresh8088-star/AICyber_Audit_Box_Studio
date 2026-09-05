@@ -1,0 +1,34 @@
+# STPI — PQC only, on their own hardware.
+# Version-controlled deliberately: a change to what this customer is licensed
+# for, or how much of their machine we use, becomes a reviewable commit.
+schema_version: 1
+
+licence:
+  customer: STPI
+  expires: 2027-09-05
+  frameworks: [PQC]          # PQC only. ISO/VAPT are not sold to this site.
+  seats: 10
+
+hardware:
+  physical_cores: 32
+  ram_gb: 125
+  ctx_per_request: 32768
+
+model: gemma-4-12B-it-Q8_0.gguf
+
+bundle: auto
+
+runtime:
+  max_audits_per_auditor: 2
+  remediation_batch_size: 4
+  remediation_timeout_sec: 1800
+  ai_recommendations_default: true
+  jwt_expiry_hours: 8
+  locked: []                 # frameworks are never here; they are licence-controlled
+
+build:
+  compile_source: true
+  encrypt_bundle: true
+  run_tests: true
+  run_sca: true
+  fail_on_sca_severity: HIGH

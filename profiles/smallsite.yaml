@@ -1,0 +1,18 @@
+# A small site: 8 cores, 32GB. Deliberately on E4B -- a 12B Q8 model is 11.8GB
+# of weights, which this profile's validation refuses on hardware this size.
+schema_version: 1
+licence:
+  customer: Regional Bank Pilot
+  expires: 2026-12-31
+  frameworks: [ISO27001, VAPT]
+  seats: 3
+hardware:
+  physical_cores: 8
+  ram_gb: 32
+model: google_gemma-4-E4B-it-Q4_K_M.gguf
+bundle: auto
+runtime:
+  max_audits_per_auditor: 1
+build:
+  compile_source: true
+  encrypt_bundle: true

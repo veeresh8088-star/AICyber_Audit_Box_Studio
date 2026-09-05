@@ -1,0 +1,17 @@
+# Signing and encryption keys must never be committed. A key that reaches git
+# history stays there, and whoever holds it can mint a licence granting every
+# framework -- including the PQC-only customer granting themselves the rest.
+keys/*.pem
+*.pem
+*.key
+.env
+
+# Build output belongs in Artifactory, not in a source repository.
+out/
+dist/
+*.tar
+*.enc
+
+__pycache__/
+*.pyc
+.venv/

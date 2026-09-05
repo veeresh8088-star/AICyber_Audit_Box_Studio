@@ -25,7 +25,9 @@ from studio.config import Profile, BundleShape
 from studio.licensing import (
     generate_keypair, private_key_from_env, issue, LicenceError,
 )
-from studio.packaging import patch_is_legal, PackagingError
+from studio.packaging import patch_is_legal, PackagingError, encrypt_bundle
+from studio import executors as ex
+from studio import pipeline as pl
 from studio.sizing import size_for_profile
 
 
@@ -137,6 +139,113 @@ def cmd_licence(args) -> int:
     return 0
 
 
+def cmd_build(args) -> int:
+    """Run the whole chain. Every gate must pass or nothing is produced."""
+    import datetime
+    p = load_profile(args.profile)
+    out_dir = os.path.abspath(args.out)
+    os.makedirs(out_dir, exist_ok=True)
+    report = pl.BuildReport(profile=p.licence.customer, version=args.version,
+                            started=datetime.datetime.now().isoformat(timespec="seconds"))
+
+    def add(step: pl.StepResult) -> bool:
+        report.steps.append(step)
+        if not step.ok:
+            print(report.summary())
+            print(f"\nreport: {_write_report(report, out_dir, args.version)}")
+        return step.ok
+
+    # 1 shape
+    step = pl._timed(lambda: pl.step_resolve_shape(p, args.repo, args.version, args.previous), "resolve shape")
+    if not add(step):
+        return 3
+    shape = step.data.get("shape", "full")
+    patch_from = step.data.get("from")
+
+    # 2 sizing
+    if not add(pl._timed(lambda: pl.step_sizing(p, _sizer), "sizing")):
+        return 4
+
+    # 3 tests
+    if not add(pl._timed(lambda: pl.step_tests(p, ex.pytest_runner(args.repo, args.test_path)), "tests")):
+        return 5
+
+    # 4 compile -- a missing compiler fails here rather than shipping source
+    if not add(pl._timed(lambda: pl.step_compile(
+            p, ex.nuitka_compiler(args.repo, os.path.join(out_dir, "compiled"))), "compile")):
+        return 6
+
+    # 5 dependency scan
+    if not add(pl._timed(lambda: pl.step_sca(p, ex.grype_scanner(args.scan_target or args.repo)), "sca")):
+        return 7
+
+    # 6 bundle
+    step = pl._timed(lambda: pl.step_bundle(
+        p, shape, ex.bundle_builder(args.repo, out_dir, args.version, patch_from)), "bundle")
+    if not add(step):
+        return 8
+    bundle_path = step.data["path"]
+
+    # 7 verify before anyone ships it
+    if not add(pl._timed(lambda: pl.step_verify(bundle_path, ex.tar_verifier()), "verify")):
+        return 9
+
+    # 8 licence
+    step = pl._timed(lambda: pl.step_licence(p, _issue_for), "licence")
+    if not add(step):
+        return 10
+    licence_key = step.data["licence_key"]
+    report.licence_key = licence_key
+
+    # 9 encrypt, keyed to that licence
+    artifact = bundle_path
+    if p.build.encrypt_bundle:
+        enc_path = bundle_path + ".enc"
+        step = pl._timed(lambda: pl.step_encrypt(
+            p, bundle_path, licence_key,
+            lambda src, key: encrypt_bundle(src, enc_path, key)), "encrypt")
+        if not add(step):
+            return 11
+        artifact = enc_path
+    report.artifact = artifact
+
+    # 10 publish
+    publisher = (ex.artifactory_publisher(args.artifactory, args.artifactory_repo)
+                 if args.artifactory else None)
+    if not add(pl._timed(lambda: pl.step_publish(p, artifact, args.version, publisher), "publish")):
+        return 12
+
+    print(report.summary())
+    print(f"\nartifact: {artifact}")
+    print(f"   licence:  {licence_key[:48]}…")
+    print(f"   report:   {_write_report(report, out_dir, args.version)}")
+    return 0
+
+
+def _sizer(**kw):
+    from studio.sizing import _load
+    mod = _load()
+    return mod.size_deployment(**kw).as_dict()
+
+
+def _issue_for(profile) -> str:
+    return issue(
+        private_key_from_env(),
+        customer=profile.licence.customer,
+        expires=profile.licence.expires,
+        frameworks=[f.value for f in profile.licence.frameworks],
+        seats=profile.licence.seats,
+        tokens=profile.licence.tokens,
+    )
+
+
+def _write_report(report, out_dir: str, version: str) -> str:
+    path = os.path.join(out_dir, f"build-report-{version}.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(report.as_dict(), fh, indent=2, default=str)
+    return path
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="studio", description="AuditBox release studio")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -155,6 +264,22 @@ def build_parser() -> argparse.ArgumentParser:
     k = sub.add_parser("keygen", help="generate a licence signing keypair")
     k.add_argument("--out", default="keys")
     k.set_defaults(func=cmd_keygen)
+
+    b = sub.add_parser("build", help="run the whole chain: gates, bundle, licence, publish")
+    b.add_argument("profile")
+    b.add_argument("--version", required=True)
+    b.add_argument("--previous", default=None)
+    b.add_argument("--repo", default=".", help="path to the product repository")
+    b.add_argument("--out", default="out", help="where artifacts are written")
+    b.add_argument("--scan-target", default=None, help="image or path for the SCA scan")
+    b.add_argument("--test-path", nargs="*", default=None,
+                   help="test paths to run. The product's tests/ mixes pytest files "
+                        "with runnable scripts that sys.exit at import, which pytest "
+                        "cannot collect -- name the collectable ones explicitly.")
+    b.add_argument("--artifactory", default=os.environ.get("ARTIFACTORY_URL"),
+                   help="base URL; omitted, the artifact is left locally")
+    b.add_argument("--artifactory-repo", default="auditbox/releases")
+    b.set_defaults(func=cmd_build)
 
     li = sub.add_parser("licence", help="issue a signed licence key for a profile")
     li.add_argument("profile")

@@ -71,12 +71,18 @@ class BuildReport:
         return "\n".join(lines)
 
 
-def _timed(fn: Callable[[], StepResult]) -> StepResult:
+def _timed(fn: Callable[[], StepResult], name: str = "step") -> StepResult:
+    """Run a step, timing it, converting any exception into a failed result.
+
+    The name is passed in because an exception gives no clue which step raised,
+    and "stopped at: unknown" tells whoever reads the build report nothing.
+    """
     t0 = time.time()
     try:
         res = fn()
     except Exception as exc:                       # a step must never take the chain down
-        return StepResult("unknown", False, f"{type(exc).__name__}: {exc}", time.time() - t0)
+        return StepResult(name, False, f"{type(exc).__name__}: {exc}",
+                          round(time.time() - t0, 1))
     res.seconds = round(time.time() - t0, 1)
     return res
 

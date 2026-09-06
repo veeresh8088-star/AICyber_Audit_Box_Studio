@@ -41,7 +41,7 @@ def load_profile(path: str) -> Profile:
     except ValidationError as exc:
         print(f"\n{path} is not a valid profile:\n", file=sys.stderr)
         for err in exc.errors():
-            loc = " → ".join(str(p) for p in err["loc"]) or "(root)"
+            loc = " -> ".join(str(p) for p in err["loc"]) or "(root)"
             print(f"   {loc}: {err['msg']}", file=sys.stderr)
         raise SystemExit(2)
 
@@ -72,7 +72,7 @@ def cmd_validate(args) -> int:
 
 def cmd_plan(args) -> int:
     p = load_profile(args.profile)
-    print(f"\nplan for {p.licence.customer} · version {args.version}\n")
+    print(f"\nplan for {p.licence.customer} - version {args.version}\n")
 
     shape = p.bundle.value
     base = p.patch_from or args.previous
@@ -133,8 +133,8 @@ def cmd_licence(args) -> int:
     except LicenceError as exc:
         print(f"\ncannot issue: {exc}", file=sys.stderr)
         return 2
-    print(f"\n{p.licence.customer} · {', '.join(f.value for f in p.licence.frameworks)} "
-          f"· expires {p.licence.expires.isoformat()}\n")
+    print(f"\n{p.licence.customer} - {', '.join(f.value for f in p.licence.frameworks)} "
+          f"- expires {p.licence.expires.isoformat()}\n")
     print(key)
     return 0
 
@@ -217,7 +217,7 @@ def cmd_build(args) -> int:
 
     print(report.summary())
     print(f"\nartifact: {artifact}")
-    print(f"   licence:  {licence_key[:48]}…")
+    print(f"   licence:  {licence_key[:48]}...")
     print(f"   report:   {_write_report(report, out_dir, args.version)}")
     return 0
 
@@ -288,6 +288,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # The operator running this is on a Windows console, which is cp1252 more
+    # often than not. Anything outside that map either raised UnicodeEncodeError
+    # or printed as a literal "→" in the middle of the invalid-profile
+    # report -- exactly the message somebody non-technical has to read. The
+    # printed text is ASCII now; this is the belt for a customer name, path or
+    # profile field that is not.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass                              # not reconfigurable; ASCII output still prints
     args = build_parser().parse_args(argv)
     return args.func(args)
 

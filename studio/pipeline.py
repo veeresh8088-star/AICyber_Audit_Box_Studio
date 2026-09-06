@@ -129,8 +129,8 @@ def step_sizing(profile: Profile, sizer: Callable) -> StepResult:
     )
     return StepResult(
         "sizing", True,
-        f"-np {s['np_slots']} -c {s['shared_pool']:,} · "
-        f"{s['max_concurrent_audits']} concurrent audits · limited by {s['limited_by']}",
+        f"-np {s['np_slots']} -c {s['shared_pool']:,} - "
+        f"{s['max_concurrent_audits']} concurrent audits - limited by {s['limited_by']}",
         data=s,
     )
 
@@ -202,7 +202,7 @@ def step_encrypt(profile: Profile, bundle_path: str, licence_key: str,
     man = encryptor(bundle_path, licence_key)
     return StepResult("encrypt", True,
                       f"{man['encrypted_bytes']:,} bytes, "
-                      f"sha256 {man['sha256_encrypted'][:16]}…", data=man)
+                      f"sha256 {man['sha256_encrypted'][:16]}...", data=man)
 
 
 def step_publish(profile: Profile, artifact: str, version: str,

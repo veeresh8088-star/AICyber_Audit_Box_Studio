@@ -89,6 +89,7 @@
 </header>
 
 <main>
+  <div id="stale" class="note bad hide"></div>
   <h2>Customer</h2>
   <div class="cards" id="profiles"><span class="muted">loading…</span></div>
 
@@ -148,9 +149,10 @@
         <label>Bundle</label>
         <div class="shape" id="shape">
           <button class="on" data-s="auto" onclick="setShape('auto')">Decide for me</button>
-          <button data-s="patch" onclick="setShape('patch')">Patch only</button>
-          <button data-s="full" onclick="setShape('full')">Full bundle</button>
+          <button data-s="patch" onclick="setShape('patch')">App code only</button>
+          <button data-s="full" onclick="setShape('full')">Everything</button>
         </div>
+        <div class="muted" id="shape-what" style="font-size:12px;margin-top:6px"></div>
       </div>
     </div>
     <form id="form" onsubmit="return false">
@@ -179,11 +181,25 @@
 
 <script>
 let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto", VERSIONS = [];
+const PAGE_API = 3;   // must match web.API_VERSION; see the banner below
+
+const SHAPE_MEANS = {
+  auto:  "Compares the two versions and picks. Only src/ and config/ changed " +
+         "-> app code only. Anything under that -- dependencies, a Dockerfile, " +
+         "a model -- and it builds everything, because a patch cannot rebuild " +
+         "those layers on the customer's machine.",
+  patch: "Rebuilds only the application layer on top of the images the customer " +
+         "already has. About 2 GB. Their database, evidence and past audits are " +
+         "untouched. It will be refused if anything beneath the app layer changed.",
+  full:  "Every image, including the model weights. About 8 GB. Needed for a " +
+         "first install, or after a dependency, Dockerfile or model change.",
+};
 
 function setShape(s){
   SHAPE = s;
   document.querySelectorAll("#shape button").forEach(b =>
     b.classList.toggle("on", b.dataset.s === s));
+  document.getElementById("shape-what").textContent = SHAPE_MEANS[s] || "";
   document.getElementById("plan").innerHTML = "";
 }
 
@@ -236,6 +252,21 @@ async function load(){
   PROFILES = d.profiles || [];
   document.getElementById("repo").textContent = d.repo || "";
   VERSIONS = d.versions || [];
+  const stale = document.getElementById("stale");
+  if ((d.api_version || 0) < PAGE_API){
+    stale.classList.remove("hide");
+    stale.innerHTML = "<b>This page is newer than the server running it.</b><br>" +
+      "The page is read from disk each time; the endpoints are not. Buttons here " +
+      "will answer <span class='mono'>not found</span> until you stop the server " +
+      "and start it again.";
+  } else { stale.classList.add("hide"); }
+  if (d.is_git_repo === false){
+    stale.classList.remove("hide");
+    stale.innerHTML = "<b>That folder is not a git repository.</b><br>" +
+      "Versions come from its tags, so patch and full cannot be decided. " +
+      "Start the server with <span class='mono'>--repo</span> pointing at the " +
+      "product repository.";
+  }
   const dl = document.getElementById("known");
   if (dl) dl.innerHTML = VERSIONS.map(v => `<option value="${esc(v)}">`).join("");
   const vs = document.getElementById("versions");
@@ -353,7 +384,8 @@ async function createCustomer(){
   const out = document.getElementById("nc-out");
   if (d.error){ out.textContent = d.error; return; }
   out.textContent = "created " + d.created;
-  await load();
+  await setShape("auto");
+load();
   document.getElementById("newcust").classList.add("hide");
 }
 
@@ -450,6 +482,7 @@ function finish(d){
   </div>`;
 }
 
+setShape("auto");
 load();
 </script>
 </body>

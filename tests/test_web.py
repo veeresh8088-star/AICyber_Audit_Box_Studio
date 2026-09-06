@@ -248,3 +248,38 @@ def test_booleans_and_lists_are_written_as_yaml_not_python(tmp_path):
     assert web._yaml_value(True) == "true"
     assert web._yaml_value(False) == "false"
     assert web._yaml_value(["PQC", "VAPT"]) == "[PQC, VAPT]"
+
+
+# -- a page newer than the server running it ---------------------------------
+# The page is read from disk on every request; the routes are whatever the
+# process loaded at start. So editing the studio and reloading the browser
+# showed new buttons wired to endpoints that answered "not found", which reads
+# as a broken feature rather than a server that needs restarting.
+
+def test_the_page_and_the_server_agree_on_the_api_version():
+    """If a route was added, both numbers move. This test is the reminder."""
+    import re as _re
+    with open(web.PAGE, encoding="utf-8") as fh:
+        html = fh.read()
+    m = _re.search(r"const PAGE_API = (\d+)", html)
+    assert m, "the page no longer declares PAGE_API"
+    assert int(m.group(1)) == web.API_VERSION, (
+        "studio/web.py API_VERSION=%d but the page expects %s -- bump both when "
+        "adding a route, or the stale-server banner lies" % (web.API_VERSION, m.group(1)))
+
+
+def test_the_profiles_response_carries_what_the_banner_needs():
+    """api_version and is_git_repo are what the page uses to explain itself."""
+    import inspect
+    src = inspect.getsource(web.Handler.do_GET)
+    assert "api_version" in src and "is_git_repo" in src
+
+
+def test_every_bundle_shape_is_explained_on_the_page():
+    """"Patch only" tells an operator nothing about what is patched."""
+    with open(web.PAGE, encoding="utf-8") as fh:
+        html = fh.read()
+    for word in ("application layer", "model weights", "2 GB", "8 GB"):
+        assert word in html, "the shape explanation lost: %s" % word
+    # The buttons say what happens, not what the code calls it.
+    assert "App code only" in html and "Everything" in html

@@ -34,6 +34,13 @@ from studio.licensing import issue, private_key_from_env, LicenceError
 from studio.packaging import patch_is_legal, PackagingError
 from studio.sizing import size_for_profile
 
+# Bumped whenever a route is added or changed. The page is re-read from disk on
+# every request, so it is always current; the routes are whatever the running
+# process loaded at start. That combination shows an operator new buttons wired
+# to endpoints that answer "not found", which looks like a broken feature rather
+# than a stale server. The page checks this and says which it is.
+API_VERSION = 3
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 PAGE = os.path.join(HERE, "static", "index.html")
@@ -343,7 +350,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"profiles": [profile_summary(p)
                                      for p in profile_paths(self.profiles_dir)],
                         "repo": os.path.abspath(self.repo),
-                        "versions": known_versions(self.repo)})
+                        "versions": known_versions(self.repo),
+                        "api_version": API_VERSION,
+                        "is_git_repo": os.path.isdir(os.path.join(self.repo, ".git"))})
             return
         if path.startswith("/api/build/"):
             job = JOBS.get(path.rsplit("/", 1)[-1])

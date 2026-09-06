@@ -554,11 +554,31 @@ def test_no_runtime_limits_means_no_flags(monkeypatch, tmp_path):
     assert "--runtime" not in seen["cmd"]
 
 
-def test_a_profile_without_a_pinned_figure_uses_the_derived_one():
-    """max_concurrent_audits is None by design: the hardware decides.
+def test_a_derived_figure_is_never_shipped():
+    """A profile's claimed hardware is not a measurement of the real machine.
 
-    Shipping that None would write MAX_CONCURRENT_AUDITS=None into a customer's
-    compose file.
+    MAX_CONCURRENT_AUDITS in the environment wins unconditionally in the app, so
+    shipping a number derived from "32 cores" to a box that has 4 admits eight
+    times what it can finish. Unset, the container derives it from the cores it
+    actually has. Only a figure an operator wrote down deliberately is pinned.
+    """
+    import yaml
+    from studio.config import Profile
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "profiles", "stpi.yaml"), encoding="utf-8") as fh:
+        p = Profile(**yaml.safe_load(fh))
+    assert p.runtime.max_concurrent_audits is None, "profile now pins one; test is stale"
+    import inspect
+    from studio import chain
+    src = inspect.getsource(chain.run_chain)
+    assert 'sizing.get("max_concurrent_audits")' not in src, (
+        "the derived figure is being shipped again")
+
+
+def test_the_derived_figure_still_exists_for_display():
+    """Still computed and shown on the page -- it is a useful prediction.
+
+    It is simply not shipped: see test_a_derived_figure_is_never_shipped.
     """
     import yaml
     from studio.config import Profile

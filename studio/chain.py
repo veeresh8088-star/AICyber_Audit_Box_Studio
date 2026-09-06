@@ -112,15 +112,22 @@ def run_chain(profile: Profile, ctx: ChainContext, *, repo: str, version: str,
     # 6 bundle. The sizing step computed this customer's limits; they are
     # carried into the compose the bundle ships, rather than being reported and
     # then discarded while the customer's container detects its own.
-    # The profile may pin a figure; where it does not, max_concurrent_audits is
-    # None by design and the number the sizing step derived from this customer's
-    # hardware is the answer. Shipping the literal None would write
-    # MAX_CONCURRENT_AUDITS=None into their compose.
+    # Only what the profile states outright is pinned. The derived figure is
+    # deliberately NOT shipped, and that distinction matters more than it looks:
+    #
+    # MAX_CONCURRENT_AUDITS in the environment wins unconditionally in the app,
+    # by design, so an operator who measured their hardware can override. A
+    # figure derived from a profile's CLAIMED hardware is not that measurement.
+    # Licence a site for 32 cores, ship them 16 concurrent audits, and if the
+    # machine really has 4 the app admits eight times what it can finish --
+    # which the compose file documents as measured behaviour: three concurrent
+    # audits still running after 900 seconds having finished nothing.
+    #
+    # Left unset, the container derives max(2, min(16, physical // 2)) from the
+    # cores it actually has, which is right whatever the profile guessed.
     runtime_env = {"MAX_AUDITS_PER_AUDITOR": profile.runtime.max_audits_per_auditor}
-    concurrent = (profile.runtime.max_concurrent_audits
-                  or sizing.get("max_concurrent_audits"))
-    if concurrent:
-        runtime_env["MAX_CONCURRENT_AUDITS"] = concurrent
+    if profile.runtime.max_concurrent_audits:
+        runtime_env["MAX_CONCURRENT_AUDITS"] = profile.runtime.max_concurrent_audits
     step = record(pl._timed(lambda: pl.step_bundle(
         profile, ctx.shape,
         ex.bundle_builder(repo, out_dir, version, patch_from, runtime_env)), "bundle"))

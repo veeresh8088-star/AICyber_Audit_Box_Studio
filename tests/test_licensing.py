@@ -5,111 +5,174 @@ says which frameworks were bought, so a PQC-only customer cannot be served.
 These keys carry that, signed, so the answer cannot be changed by the party it
 constrains.
 """
-import base64, json, os, sys
+import base64
+import datetime
+import json
 from datetime import date, timedelta
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytest
+from cryptography.hazmat.primitives import serialization
+
 from studio.licensing import (
     generate_keypair, load_private_key, load_public_key, issue, verify,
     LicenceError, private_key_from_env,
 )
 
-P = F = 0
-def check(label, cond, detail=""):
-    global P, F
-    if cond: P += 1; print(f"  PASS  {label}")
-    else:    F += 1; print(f"  FAIL  {label}   {detail}")
+FUTURE = date.today() + timedelta(days=365)
 
-priv_pem, pub_pem = generate_keypair()
-priv, pub = load_private_key(priv_pem), load_public_key(pub_pem)
-future = date.today() + timedelta(days=365)
 
-print("\n[1] a PQC-only licence grants PQC and nothing else")
-key = issue(priv, customer="STPI", expires=future, frameworks=["PQC"])
-lic = verify(pub, key)
-check("customer preserved", lic.customer == "STPI", lic.customer)
-check("permits PQC", lic.permits("PQC"))
-check("denies ISO27001", not lic.permits("ISO27001"))
-check("denies VAPT", not lic.permits("VAPT"))
-check("case-insensitive, denies 'pqc ' variants correctly", lic.permits("pqc") and lic.permits(" PQC "))
-check("expiry preserved", lic.expires == future, str(lic.expires))
-check("has a unique id", len(lic.licence_id) >= 8, lic.licence_id)
+@pytest.fixture(scope="module")
+def keypair():
+    """One keypair for the module: generation is the slow part, not the tests."""
+    priv_pem, pub_pem = generate_keypair()
+    return dict(priv_pem=priv_pem, pub_pem=pub_pem,
+                priv=load_private_key(priv_pem), pub=load_public_key(pub_pem))
 
-print("\n[2] tampering is detected")
-head, body_b64, sig_b64 = key.split(".")
-pad = "=" * (-len(body_b64) % 4)
-payload = json.loads(base64.urlsafe_b64decode(body_b64 + pad))
-payload["frameworks"] = ["PQC", "ISO27001", "VAPT"]          # customer grants themselves everything
-forged_body = base64.urlsafe_b64encode(
-    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
-forged = f"{head}.{forged_body}.{sig_b64}"
-try:
-    verify(pub, forged); check("edited entitlements rejected", False, "forgery accepted")
-except LicenceError as e:
-    check("edited entitlements rejected", "signature" in str(e).lower(), str(e)[:60])
 
-payload2 = json.loads(base64.urlsafe_b64decode(body_b64 + pad))
-payload2["expires"] = (date.today() + timedelta(days=99999)).isoformat()
-b2 = base64.urlsafe_b64encode(json.dumps(payload2, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
-try:
-    verify(pub, f"{head}.{b2}.{sig_b64}"); check("extended expiry rejected", False, "forgery accepted")
-except LicenceError: check("extended expiry rejected", True)
+@pytest.fixture(scope="module")
+def priv(keypair):
+    return keypair["priv"]
 
-print("\n[3] a different vendor's key cannot sign for us")
-other_priv, _ = generate_keypair()
-other = issue(load_private_key(other_priv), customer="STPI", expires=future, frameworks=["PQC"])
-try:
-    verify(pub, other); check("foreign signature rejected", False, "accepted")
-except LicenceError: check("foreign signature rejected", True)
 
-print("\n[4] expiry is enforced, and distinguishable from forgery")
-past = issue(priv, customer="X", expires=date.today() - timedelta(days=1), frameworks=["PQC"])
-try:
-    verify(pub, past); check("expired licence rejected", False, "accepted")
-except LicenceError as e:
-    check("expired licence rejected", "expired" in str(e).lower(), str(e)[:70])
-lic2 = verify(pub, past, check_expiry=False)
-check("still decodable for a clear error message", lic2.customer == "X")
-check("reports how long ago it lapsed", lic2.expired and lic2.days_remaining < 0, str(lic2.days_remaining))
+@pytest.fixture(scope="module")
+def pub(keypair):
+    return keypair["pub"]
 
-print("\n[5] malformed input never crashes, always explains")
-for bad, why in [("", "empty"), ("nonsense", "no dots"), ("A.B.C", "wrong scheme"),
-                 ("AUDITBOX-LIC-1.!!!.!!!", "undecodable"), (None, "None")]:
-    try:
-        verify(pub, bad); check(f"rejects {why}", False, "accepted")
-    except LicenceError: check(f"rejects {why}", True)
-    except Exception as e: check(f"rejects {why}", False, f"wrong exception {type(e).__name__}")
 
-print("\n[6] refuses to issue something meaningless")
-for kwargs, why in [
-    (dict(customer="", expires=future, frameworks=["PQC"]), "no customer"),
-    (dict(customer="X", expires=future, frameworks=[]), "no frameworks"),
-]:
-    try:
-        issue(priv, **kwargs); check(f"refuses {why}", False, "issued anyway")
-    except LicenceError: check(f"refuses {why}", True)
+@pytest.fixture(scope="module")
+def pqc_key(priv):
+    return issue(priv, customer="STPI", expires=FUTURE, frameworks=["PQC"])
 
-print("\n[7] the signing key is never read from the repo")
-os.environ.pop("AUDITBOX_LICENCE_KEY", None)
-try:
-    private_key_from_env(); check("absent key raises a clear error", False, "no raise")
-except LicenceError as e:
-    check("absent key raises a clear error", "environment" in str(e).lower(), str(e)[:60])
-os.environ["AUDITBOX_LICENCE_KEY"] = priv_pem.decode()
-check("reads the key from the environment when set",
-      issue(private_key_from_env(), customer="Y", expires=future, frameworks=["ISO27001"]).startswith("AUDITBOX-LIC-1."))
-os.environ.pop("AUDITBOX_LICENCE_KEY", None)
 
-print("\n[8] the public key cannot mint licences")
-check("public key has no sign method", not hasattr(pub, "sign"))
-check("keypair round-trips through PEM", load_public_key(pub_pem).public_bytes(
-        encoding=__import__("cryptography.hazmat.primitives.serialization", fromlist=["x"]).Encoding.PEM,
-        format=__import__("cryptography.hazmat.primitives.serialization", fromlist=["x"]).PublicFormat.SubjectPublicKeyInfo,
-      ) == pub_pem)
+def _reforge(key, **changes):
+    """Edit the payload and keep the original signature -- what a customer would try."""
+    head, body_b64, sig_b64 = key.split(".")
+    pad = "=" * (-len(body_b64) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(body_b64 + pad))
+    payload.update(changes)
+    body = base64.urlsafe_b64encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+    return head + "." + body + "." + sig_b64
 
-print("\n[9] determinism: same inputs, same signature")
-a = issue(priv, customer="Z", expires=future, frameworks=["PQC"], licence_id="fixed", issued=__import__("datetime").datetime(2026,1,1,tzinfo=__import__("datetime").timezone.utc))
-b = issue(priv, customer="Z", expires=future, frameworks=["PQC"], licence_id="fixed", issued=__import__("datetime").datetime(2026,1,1,tzinfo=__import__("datetime").timezone.utc))
-check("identical inputs produce an identical key", a == b)
 
-print(f"\n{'='*62}\n  {P} passed, {F} failed")
-sys.exit(1 if F else 0)
+# -- a PQC-only licence grants PQC and nothing else --------------------------
+
+def test_pqc_licence_grants_pqc_and_nothing_else(pub, pqc_key):
+    lic = verify(pub, pqc_key)
+    assert lic.customer == "STPI"
+    assert lic.permits("PQC")
+    assert not lic.permits("ISO27001")
+    assert not lic.permits("VAPT")
+    assert lic.permits("pqc") and lic.permits(" PQC ")
+    assert lic.expires == FUTURE
+    assert len(lic.licence_id) >= 8
+
+
+# -- tampering is detected ---------------------------------------------------
+
+def test_edited_entitlements_are_rejected(pub, pqc_key):
+    """The customer grants themselves everything; the signature disagrees."""
+    with pytest.raises(LicenceError) as e:
+        verify(pub, _reforge(pqc_key, frameworks=["PQC", "ISO27001", "VAPT"]))
+    assert "signature" in str(e.value).lower()
+
+
+def test_an_extended_expiry_is_rejected(pub, pqc_key):
+    forged = _reforge(pqc_key, expires=(date.today() + timedelta(days=99999)).isoformat())
+    with pytest.raises(LicenceError):
+        verify(pub, forged)
+
+
+# -- a different vendor's key cannot sign for us -----------------------------
+
+def test_a_foreign_signature_is_rejected(pub):
+    other_priv, _ = generate_keypair()
+    other = issue(load_private_key(other_priv), customer="STPI",
+                  expires=FUTURE, frameworks=["PQC"])
+    with pytest.raises(LicenceError):
+        verify(pub, other)
+
+
+# -- expiry is enforced, and distinguishable from forgery --------------------
+
+@pytest.fixture(scope="module")
+def expired_key(priv):
+    return issue(priv, customer="X", expires=date.today() - timedelta(days=1),
+                 frameworks=["PQC"])
+
+
+def test_an_expired_licence_is_rejected(pub, expired_key):
+    with pytest.raises(LicenceError) as e:
+        verify(pub, expired_key)
+    assert "expired" in str(e.value).lower()
+
+
+def test_an_expired_licence_is_still_decodable_for_a_clear_message(pub, expired_key):
+    """Expiry and forgery must not look the same to whoever reads the error."""
+    lic = verify(pub, expired_key, check_expiry=False)
+    assert lic.customer == "X"
+    assert lic.expired and lic.days_remaining < 0
+
+
+# -- malformed input never crashes, always explains --------------------------
+
+@pytest.mark.parametrize("bad", [
+    pytest.param("", id="empty"),
+    pytest.param("nonsense", id="no-dots"),
+    pytest.param("A.B.C", id="wrong-scheme"),
+    pytest.param("AUDITBOX-LIC-1.!!!.!!!", id="undecodable"),
+    pytest.param(None, id="None"),
+])
+def test_malformed_input_raises_licence_error_and_nothing_else(pub, bad):
+    with pytest.raises(LicenceError):
+        verify(pub, bad)
+
+
+# -- refuses to issue something meaningless ----------------------------------
+
+@pytest.mark.parametrize("kwargs", [
+    pytest.param(dict(customer="", expires=FUTURE, frameworks=["PQC"]), id="no-customer"),
+    pytest.param(dict(customer="X", expires=FUTURE, frameworks=[]), id="no-frameworks"),
+])
+def test_refuses_to_issue_something_meaningless(priv, kwargs):
+    with pytest.raises(LicenceError):
+        issue(priv, **kwargs)
+
+
+# -- the signing key is never read from the repo -----------------------------
+
+def test_an_absent_signing_key_raises_a_clear_error(monkeypatch):
+    monkeypatch.delenv("AUDITBOX_LICENCE_KEY", raising=False)
+    with pytest.raises(LicenceError) as e:
+        private_key_from_env()
+    assert "environment" in str(e.value).lower()
+
+
+def test_the_signing_key_is_read_from_the_environment(monkeypatch, keypair):
+    monkeypatch.setenv("AUDITBOX_LICENCE_KEY", keypair["priv_pem"].decode())
+    key = issue(private_key_from_env(), customer="Y", expires=FUTURE,
+                frameworks=["ISO27001"])
+    assert key.startswith("AUDITBOX-LIC-1.")
+
+
+# -- the public key cannot mint licences -------------------------------------
+
+def test_the_public_key_cannot_sign(pub):
+    assert not hasattr(pub, "sign")
+
+
+def test_the_keypair_round_trips_through_pem(keypair):
+    assert load_public_key(keypair["pub_pem"]).public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ) == keypair["pub_pem"]
+
+
+# -- determinism -------------------------------------------------------------
+
+def test_identical_inputs_produce_an_identical_key(priv):
+    """Reissuing the same licence must not produce a different file to ship."""
+    args = dict(customer="Z", expires=FUTURE, frameworks=["PQC"], licence_id="fixed",
+                issued=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc))
+    assert issue(priv, **args) == issue(priv, **args)

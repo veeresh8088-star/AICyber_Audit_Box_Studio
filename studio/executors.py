@@ -156,8 +156,8 @@ def bundle_builder(repo: str, out_dir: str, version: str,
         script = os.path.join(repo, "build_customer_bundle.py")
         if not os.path.isfile(script):
             return False, None, (
-                f"build_customer_bundle.py is not in {repo}. It exists only in the "
-                f"archived branch on one machine -- restore it to the repository."
+                f"build_customer_bundle.py is not in {repo} -- point --repo at the "
+                f"product repository, which is where that script lives."
             )
         cmd = [sys.executable, script, "--version", version]
         if shape == "full":

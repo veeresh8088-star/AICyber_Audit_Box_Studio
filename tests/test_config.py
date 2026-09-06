@@ -3,21 +3,21 @@
 The point of validating here is that the failure lands on the person cutting
 the release, who can fix it, rather than on the customer three weeks later.
 """
-import os, sys
+import os
 from datetime import date, timedelta
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytest
 import yaml
 from pydantic import ValidationError
+
 from studio.config import Profile, Framework, ModelChoice, BundleShape
 
-P = F = 0
-def check(label, cond, detail=""):
-    global P, F
-    if cond: P += 1; print(f"  PASS  {label}")
-    else:    F += 1; print(f"  FAIL  {label}   {detail}")
-
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FUTURE = (date.today() + timedelta(days=200)).isoformat()
+
+
 def prof(**over):
+    """A valid profile, with whatever the test wants to change about it."""
     base = dict(
         licence=dict(customer="ACME", expires=FUTURE, frameworks=["PQC"]),
         hardware=dict(physical_cores=32, ram_gb=125),
@@ -26,67 +26,126 @@ def prof(**over):
     base.update(over)
     return Profile(**base)
 
-def rejects(why, **over):
-    try:
-        prof(**over); check(f"rejects {why}", False, "accepted")
-    except ValidationError as e:
-        check(f"rejects {why}", True)
 
-print("\n[1] the real profiles on disk parse")
-here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for name in ("stpi.yaml", "smallsite.yaml"):
-    path = os.path.join(here, "profiles", name)
-    p = Profile(**yaml.safe_load(open(path, encoding="utf-8")))
-    check(f"{name} valid", p.licence.customer != "", p.licence.customer)
-stpi = Profile(**yaml.safe_load(open(os.path.join(here,"profiles","stpi.yaml"), encoding="utf-8")))
-check("STPI is PQC only", stpi.licence.frameworks == [Framework.PQC], str(stpi.licence.frameworks))
+def _shipped(name):
+    with open(os.path.join(ROOT, "profiles", name), encoding="utf-8") as fh:
+        return Profile(**yaml.safe_load(fh))
 
-print("\n[2] a model that cannot fit is refused before it ships")
-rejects("12B on a 16GB box", model="gemma-4-12B-it-Q8_0.gguf", hardware=dict(physical_cores=8, ram_gb=16))
-ok = prof(model="gemma-4-12B-it-Q8_0.gguf", hardware=dict(physical_cores=8, ram_gb=32))
-check("12B on 32GB is allowed", ok.model == ModelChoice.GEMMA4_12B_Q8)
-ok = prof(model="google_gemma-4-E4B-it-Q4_K_M.gguf", hardware=dict(physical_cores=4, ram_gb=16))
-check("E4B on 16GB is allowed", ok.hardware.ram_gb == 16)
 
-print("\n[3] a patch needs a base, and a base needs a patch")
-rejects("patch without patch_from", bundle="patch")
-rejects("patch_from without patch", bundle="full", patch_from="3.22")
-ok = prof(bundle="patch", patch_from="3.22")
-check("patch with a base is valid", ok.patch_from == "3.22")
+# -- the real profiles on disk parse -----------------------------------------
 
-print("\n[4] a licence must grant something")
-rejects("no frameworks", licence=dict(customer="X", expires=FUTURE, frameworks=[]))
-rejects("duplicate frameworks", licence=dict(customer="X", expires=FUTURE, frameworks=["PQC","PQC"]))
-rejects("unknown framework", licence=dict(customer="X", expires=FUTURE, frameworks=["NOTREAL"]))
-rejects("empty customer", licence=dict(customer="", expires=FUTURE, frameworks=["PQC"]))
+@pytest.mark.parametrize("name", ["stpi.yaml", "smallsite.yaml"])
+def test_shipped_profile_is_valid(name):
+    assert _shipped(name).licence.customer != ""
 
-print("\n[5] hardware must be plausible")
-rejects("zero cores", hardware=dict(physical_cores=0, ram_gb=64))
-rejects("zero RAM", hardware=dict(physical_cores=8, ram_gb=0))
-rejects("context not a multiple of 1024", hardware=dict(physical_cores=8, ram_gb=64, ctx_per_request=30000))
-ok = prof(hardware=dict(physical_cores=8, ram_gb=64, ctx_per_request=65536))
-check("65536 context accepted", ok.hardware.ctx_per_request == 65536)
 
-print("\n[6] frameworks can never be a customer-adjustable setting")
-rejects("locking an unknown setting", runtime=dict(locked=["frameworks"]))
-ok = prof(runtime=dict(locked=["max_concurrent_audits"]))
-check("locking a real setting is fine", ok.runtime.locked == ["max_concurrent_audits"])
+def test_stpi_is_pqc_only():
+    """The customer this was written for buys PQC and must get only PQC."""
+    assert _shipped("stpi.yaml").licence.frameworks == [Framework.PQC]
 
-print("\n[7] build gates are validated")
-rejects("nonsense severity", build=dict(fail_on_sca_severity="SPICY"))
-ok = prof(build=dict(fail_on_sca_severity="critical"))
-check("severity is normalised to upper case", ok.build.fail_on_sca_severity == "CRITICAL")
-ok = prof(build=dict(compile_source=False))
-check("compilation can be turned off explicitly", ok.build.compile_source is False)
 
-print("\n[8] defaults are the safe ones")
-d = prof()
-check("compiles by default", d.build.compile_source is True)
-check("encrypts by default", d.build.encrypt_bundle is True)
-check("tests by default", d.build.run_tests is True)
-check("scans by default", d.build.run_sca is True)
-check("blocks on HIGH by default", d.build.fail_on_sca_severity == "HIGH")
-check("bundle shape defaults to auto", d.bundle == BundleShape.AUTO)
+# -- a model that cannot fit is refused before it ships ----------------------
 
-print(f"\n{'='*62}\n  {P} passed, {F} failed")
-sys.exit(1 if F else 0)
+def test_a_model_too_large_for_the_box_is_refused():
+    with pytest.raises(ValidationError):
+        prof(model="gemma-4-12B-it-Q8_0.gguf",
+             hardware=dict(physical_cores=8, ram_gb=16))
+
+
+def test_a_model_that_fits_is_allowed():
+    assert prof(model="gemma-4-12B-it-Q8_0.gguf",
+                hardware=dict(physical_cores=8, ram_gb=32)
+                ).model == ModelChoice.GEMMA4_12B_Q8
+    assert prof(model="google_gemma-4-E4B-it-Q4_K_M.gguf",
+                hardware=dict(physical_cores=4, ram_gb=16)).hardware.ram_gb == 16
+
+
+# -- a patch needs a base, and a base needs a patch --------------------------
+
+def test_patch_without_a_base_is_refused():
+    with pytest.raises(ValidationError):
+        prof(bundle="patch")
+
+
+def test_a_base_without_a_patch_is_refused():
+    """patch_from on a full bundle means somebody misunderstood the setting."""
+    with pytest.raises(ValidationError):
+        prof(bundle="full", patch_from="3.22")
+
+
+def test_patch_with_a_base_is_valid():
+    assert prof(bundle="patch", patch_from="3.22").patch_from == "3.22"
+
+
+# -- a licence must grant something ------------------------------------------
+
+@pytest.mark.parametrize("licence", [
+    pytest.param(dict(customer="X", expires=FUTURE, frameworks=[]), id="no-frameworks"),
+    pytest.param(dict(customer="X", expires=FUTURE, frameworks=["PQC", "PQC"]), id="duplicate"),
+    pytest.param(dict(customer="X", expires=FUTURE, frameworks=["NOTREAL"]), id="unknown"),
+    pytest.param(dict(customer="", expires=FUTURE, frameworks=["PQC"]), id="empty-customer"),
+])
+def test_meaningless_licence_is_refused(licence):
+    with pytest.raises(ValidationError):
+        prof(licence=licence)
+
+
+# -- hardware must be plausible ----------------------------------------------
+
+@pytest.mark.parametrize("hardware", [
+    pytest.param(dict(physical_cores=0, ram_gb=64), id="zero-cores"),
+    pytest.param(dict(physical_cores=8, ram_gb=0), id="zero-RAM"),
+    pytest.param(dict(physical_cores=8, ram_gb=64, ctx_per_request=30000),
+                 id="context-not-a-multiple-of-1024"),
+])
+def test_implausible_hardware_is_refused(hardware):
+    with pytest.raises(ValidationError):
+        prof(hardware=hardware)
+
+
+def test_a_legal_context_size_is_accepted():
+    assert prof(hardware=dict(physical_cores=8, ram_gb=64, ctx_per_request=65536)
+                ).hardware.ctx_per_request == 65536
+
+
+# -- frameworks can never be a customer-adjustable setting -------------------
+
+def test_frameworks_cannot_be_declared_customer_adjustable():
+    """What was licensed is decided at build time, by us, and never moves."""
+    with pytest.raises(ValidationError):
+        prof(runtime=dict(locked=["frameworks"]))
+
+
+def test_locking_a_real_setting_is_fine():
+    assert prof(runtime=dict(locked=["max_concurrent_audits"])
+                ).runtime.locked == ["max_concurrent_audits"]
+
+
+# -- build gates are validated -----------------------------------------------
+
+def test_a_nonsense_severity_is_refused():
+    with pytest.raises(ValidationError):
+        prof(build=dict(fail_on_sca_severity="SPICY"))
+
+
+def test_severity_is_normalised_to_upper_case():
+    assert prof(build=dict(fail_on_sca_severity="critical")
+                ).build.fail_on_sca_severity == "CRITICAL"
+
+
+def test_compilation_can_be_turned_off_explicitly():
+    """Allowed, but it has to be a deliberate line in the profile."""
+    assert prof(build=dict(compile_source=False)).build.compile_source is False
+
+
+# -- defaults are the safe ones ----------------------------------------------
+
+def test_defaults_are_the_safe_ones():
+    """Every gate is on unless somebody writes down that it should not be."""
+    d = prof()
+    assert d.build.compile_source is True
+    assert d.build.encrypt_bundle is True
+    assert d.build.run_tests is True
+    assert d.build.run_sca is True
+    assert d.build.fail_on_sca_severity == "HIGH"
+    assert d.bundle == BundleShape.AUTO

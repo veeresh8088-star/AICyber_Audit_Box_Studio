@@ -1,107 +1,159 @@
 """Encryption must fail closed, and an illegal patch must be refused."""
-import os, sys, tempfile, subprocess
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os
+import subprocess
+
+import pytest
+
 from studio.packaging import (
     encrypt_bundle, decrypt_bundle, derive_key, patch_is_legal,
     PackagingError, LOWER_LAYER_PATHS,
 )
 
-P = F = 0
-def check(label, cond, detail=""):
-    global P, F
-    if cond: P += 1; print(f"  PASS  {label}")
-    else:    F += 1; print(f"  FAIL  {label}   {detail}")
-
-tmp = tempfile.mkdtemp(prefix="abx-pack-")
-plain = os.path.join(tmp, "bundle.tar")
-BODY = os.urandom(300_000)
-open(plain, "wb").write(BODY)
 LIC = "AUDITBOX-LIC-1.abc.def"
 
-print("\n[1] round trip")
-enc = os.path.join(tmp, "bundle.enc")
-man = encrypt_bundle(plain, enc, LIC)
-check("encrypted file written", os.path.getsize(enc) > 0)
-check("ciphertext differs from plaintext", open(enc,"rb").read()[:64] != BODY[:64])
-back = os.path.join(tmp, "back.tar")
-res = decrypt_bundle(enc, back, LIC)
-check("decrypts byte-identical", open(back,"rb").read() == BODY)
-check("hash matches the manifest", res["sha256"] == man["sha256_plaintext"])
 
-print("\n[2] the wrong licence cannot open it")
-try:
-    decrypt_bundle(enc, os.path.join(tmp,"x.tar"), "AUDITBOX-LIC-1.other.key")
-    check("wrong licence rejected", False, "decrypted anyway")
-except PackagingError as e:
-    check("wrong licence rejected", "licence" in str(e).lower(), str(e)[:60])
+@pytest.fixture(scope="module")
+def bundle(tmp_path_factory):
+    """A plaintext bundle and its encrypted form, built once for the module."""
+    tmp = tmp_path_factory.mktemp("pack")
+    plain = tmp / "bundle.tar"
+    body = os.urandom(300_000)
+    plain.write_bytes(body)
+    enc = tmp / "bundle.enc"
+    manifest = encrypt_bundle(str(plain), str(enc), LIC)
+    return dict(tmp=tmp, plain=str(plain), body=body, enc=str(enc), manifest=manifest)
 
-print("\n[3] tampering is detected, not silently installed")
-blob = bytearray(open(enc,"rb").read())
-blob[-1] ^= 0xFF
-bad = os.path.join(tmp,"tampered.enc"); open(bad,"wb").write(bytes(blob))
-try:
-    decrypt_bundle(bad, os.path.join(tmp,"y.tar"), LIC)
-    check("modified bundle rejected", False, "accepted")
-except PackagingError: check("modified bundle rejected", True)
 
-print("\n[4] a foreign file fails clearly")
-junk = os.path.join(tmp,"junk.bin"); open(junk,"wb").write(b"not a bundle at all")
-try:
-    decrypt_bundle(junk, os.path.join(tmp,"z.tar"), LIC)
-    check("non-bundle rejected", False, "accepted")
-except PackagingError as e:
-    check("non-bundle rejected", "bundle" in str(e).lower(), str(e)[:60])
+# -- round trip --------------------------------------------------------------
 
-print("\n[5] key derivation")
-s = os.urandom(16)
-check("same licence+salt -> same key", derive_key(LIC, s) == derive_key(LIC, s))
-check("different salt -> different key", derive_key(LIC, s) != derive_key(LIC, os.urandom(16)))
-check("different licence -> different key", derive_key(LIC, s) != derive_key("other", s))
-check("key is 32 bytes", len(derive_key(LIC, s)) == 32)
-try:
-    derive_key("", s); check("empty licence refused", False)
-except PackagingError: check("empty licence refused", True)
-check("salt is random per encryption",
-      open(enc,"rb").read()[10:26] != encrypt_bundle(plain, os.path.join(tmp,"e2.enc"), LIC) and
-      open(enc,"rb").read()[10:26] != open(os.path.join(tmp,"e2.enc"),"rb").read()[10:26])
+def test_round_trip(bundle):
+    assert os.path.getsize(bundle["enc"]) > 0
+    with open(bundle["enc"], "rb") as fh:
+        assert fh.read()[:64] != bundle["body"][:64], "ciphertext matches plaintext"
+    back = str(bundle["tmp"] / "back.tar")
+    res = decrypt_bundle(bundle["enc"], back, LIC)
+    with open(back, "rb") as fh:
+        assert fh.read() == bundle["body"]
+    assert res["sha256"] == bundle["manifest"]["sha256_plaintext"]
 
-print("\n[6] patch legality, against a real git repo")
-repo = os.path.join(tmp, "repo"); os.makedirs(repo)
-def git(*a): return subprocess.run(["git","-C",repo,*a], capture_output=True, text=True)
-git("init","-q"); git("config","user.email","t@t"); git("config","user.name","t")
-os.makedirs(os.path.join(repo,"src"))
-open(os.path.join(repo,"src","app.py"),"w").write("v1")
-open(os.path.join(repo,"requirements.txt"),"w").write("fastapi==1\n")
-git("add","-A"); git("commit","-qm","v1"); git("tag","v1")
 
-open(os.path.join(repo,"src","app.py"),"w").write("v2 code only")
-git("add","-A"); git("commit","-qm","code change"); git("tag","v2")
-d = patch_is_legal(repo, "v1", "v2")
-check("code-only change -> patch legal", d.legal and d.shape == "patch", d.reason[:60])
+# -- the wrong licence cannot open it ----------------------------------------
 
-open(os.path.join(repo,"requirements.txt"),"w").write("fastapi==2\n")
-git("add","-A"); git("commit","-qm","dep bump"); git("tag","v3")
-d = patch_is_legal(repo, "v2", "v3")
-check("requirements change -> patch refused", not d.legal and d.shape == "full", d.reason[:70])
-check("names the blocking file", "requirements.txt" in d.blocking_changes, str(d.blocking_changes))
+def test_the_wrong_licence_cannot_open_it(bundle):
+    with pytest.raises(PackagingError) as e:
+        decrypt_bundle(bundle["enc"], str(bundle["tmp"] / "x.tar"),
+                       "AUDITBOX-LIC-1.other.key")
+    assert "licence" in str(e.value).lower()
 
-d = patch_is_legal(repo, "v1", "v3")
-check("spanning versions catches it too", not d.legal, d.reason[:60])
-d = patch_is_legal(repo, "v2", "v2")
-check("no change -> legal and says so", d.legal and "nothing changed" in d.reason, d.reason[:50])
-d = patch_is_legal(repo, "v1", "v2", model_changed=True)
-check("a changed model blocks a patch", not d.legal, str(d.blocking_changes))
 
-print("\n[7] unknown refs fail loudly rather than defaulting to 'legal'")
-try:
-    patch_is_legal(repo, "v1", "does-not-exist")
-    check("bad ref raises", False, "returned a decision")
-except PackagingError: check("bad ref raises", True)
+# -- tampering is detected, not silently installed ---------------------------
 
-check("every lower-layer path is a real concern", all(
-    p in ("requirements.txt","requirements.lock.txt","Dockerfile","Dockerfile.app",
-          "Dockerfile.llm","docker-compose.yml","docker-compose.customer.yml")
-    for p in LOWER_LAYER_PATHS))
+def test_a_modified_bundle_is_rejected(bundle):
+    with open(bundle["enc"], "rb") as fh:
+        blob = bytearray(fh.read())
+    blob[-1] ^= 0xFF
+    bad = bundle["tmp"] / "tampered.enc"
+    bad.write_bytes(bytes(blob))
+    with pytest.raises(PackagingError):
+        decrypt_bundle(str(bad), str(bundle["tmp"] / "y.tar"), LIC)
 
-print(f"\n{'='*62}\n  {P} passed, {F} failed")
-sys.exit(1 if F else 0)
+
+def test_a_foreign_file_fails_clearly(bundle):
+    junk = bundle["tmp"] / "junk.bin"
+    junk.write_bytes(b"not a bundle at all")
+    with pytest.raises(PackagingError) as e:
+        decrypt_bundle(str(junk), str(bundle["tmp"] / "z.tar"), LIC)
+    assert "bundle" in str(e.value).lower()
+
+
+# -- key derivation ----------------------------------------------------------
+
+def test_key_derivation_is_deterministic_and_salted():
+    salt = os.urandom(16)
+    assert derive_key(LIC, salt) == derive_key(LIC, salt)
+    assert derive_key(LIC, salt) != derive_key(LIC, os.urandom(16))
+    assert derive_key(LIC, salt) != derive_key("other", salt)
+    assert len(derive_key(LIC, salt)) == 32
+
+
+def test_an_empty_licence_is_refused():
+    with pytest.raises(PackagingError):
+        derive_key("", os.urandom(16))
+
+
+def test_the_salt_is_random_per_encryption(bundle):
+    """Encrypting the same bundle twice must not produce the same header.
+
+    The original of this test compared a file's bytes against the dict that
+    encrypt_bundle returns, which is never equal and so always passed. It now
+    compares the two salts.
+    """
+    second = str(bundle["tmp"] / "e2.enc")
+    encrypt_bundle(bundle["plain"], second, LIC)
+    with open(bundle["enc"], "rb") as a, open(second, "rb") as b:
+        assert a.read()[10:26] != b.read()[10:26]
+
+
+# -- patch legality, against a real git repo ---------------------------------
+
+@pytest.fixture(scope="module")
+def repo(tmp_path_factory):
+    """Three tagged versions: v1, v2 (code only), v3 (dependency bump)."""
+    path = tmp_path_factory.mktemp("repo")
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(path), *a],
+                              capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    (path / "src").mkdir()
+    (path / "src" / "app.py").write_text("v1")
+    (path / "requirements.txt").write_text("fastapi==1\n")
+    git("add", "-A"); git("commit", "-qm", "v1"); git("tag", "v1")
+
+    (path / "src" / "app.py").write_text("v2 code only")
+    git("add", "-A"); git("commit", "-qm", "code change"); git("tag", "v2")
+
+    (path / "requirements.txt").write_text("fastapi==2\n")
+    git("add", "-A"); git("commit", "-qm", "dep bump"); git("tag", "v3")
+    return str(path)
+
+
+def test_a_code_only_change_allows_a_patch(repo):
+    d = patch_is_legal(repo, "v1", "v2")
+    assert d.legal and d.shape == "patch", d.reason
+
+
+def test_a_dependency_change_refuses_a_patch(repo):
+    """A patch cannot rebuild the layer the dependency lives in."""
+    d = patch_is_legal(repo, "v2", "v3")
+    assert not d.legal and d.shape == "full", d.reason
+    assert "requirements.txt" in d.blocking_changes
+
+
+def test_spanning_versions_still_catches_it(repo):
+    assert not patch_is_legal(repo, "v1", "v3").legal
+
+
+def test_no_change_is_legal_and_says_so(repo):
+    d = patch_is_legal(repo, "v2", "v2")
+    assert d.legal and "nothing changed" in d.reason
+
+
+def test_a_changed_model_blocks_a_patch(repo):
+    assert not patch_is_legal(repo, "v1", "v2", model_changed=True).legal
+
+
+def test_unknown_refs_fail_loudly(repo):
+    """Never default to 'legal' when the comparison could not be made."""
+    with pytest.raises(PackagingError):
+        patch_is_legal(repo, "v1", "does-not-exist")
+
+
+def test_every_lower_layer_path_is_a_real_concern():
+    assert all(p in ("requirements.txt", "requirements.lock.txt", "Dockerfile",
+                     "Dockerfile.app", "Dockerfile.llm", "docker-compose.yml",
+                     "docker-compose.customer.yml")
+               for p in LOWER_LAYER_PATHS)

@@ -4,73 +4,102 @@ The compiler is the one that matters: a compile step that quietly does nothing
 while reporting success ships exactly the readable source the binary-only
 requirement exists to prevent.
 """
-import os, sys, tarfile, tempfile
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os
+import tarfile
+
+import pytest
+
 from studio import executors as ex
 
-P = F = 0
-def check(label, cond, detail=""):
-    global P, F
-    if cond: P += 1; print(f"  PASS  {label}")
-    else:    F += 1; print(f"  FAIL  {label}   {detail}")
+NUITKA_PRESENT = ex.tool_available("nuitka") or ex._module_present("nuitka")
 
-tmp = tempfile.mkdtemp(prefix="abx-exec-")
 
-print("\n[1] a missing compiler FAILS, never skips silently")
-ok, detail = ex.nuitka_compiler(tmp, os.path.join(tmp, "out"))()
-if ex.tool_available("nuitka") or ex._module_present("nuitka"):
-    check("nuitka present, so it ran", isinstance(ok, bool), detail[:60])
-else:
-    check("missing nuitka returns not-ok", ok is False, detail[:60])
-    check("and explains the consequence", "readable .py" in detail, detail[:90])
+# -- a missing compiler FAILS, never skips silently --------------------------
 
-print("\n[2] a missing scanner is an error, not an empty result")
-try:
-    ex.grype_scanner("some:image")()
-    check("grype absent raises", ex.tool_available("grype"), "returned findings")
-except ex.ExecutorError as e:
-    check("grype absent raises", True)
-    check("suggests the honest alternative", "run_sca: false" in str(e), str(e)[:80])
+@pytest.mark.skipif(NUITKA_PRESENT,
+                    reason="nuitka is installed here, so the missing-compiler path "
+                           "cannot be exercised on this machine")
+def test_a_missing_compiler_fails_and_explains_the_consequence(tmp_path):
+    ok, detail = ex.nuitka_compiler(str(tmp_path), str(tmp_path / "out"))()
+    assert ok is False, detail
+    assert "readable .py" in detail, detail
 
-print("\n[3] bundler refuses when the script is not in the repo")
-ok, path, detail = ex.bundle_builder(tmp, tmp, "3.24")("full")
-check("missing build_customer_bundle.py fails", ok is False, detail[:60])
-check("names where it actually lives", "archived branch" in detail, detail[:90])
 
-print("\n[4] tar verification")
-good = os.path.join(tmp, "good.tar")
-inner = os.path.join(tmp, "app.txt"); open(inner, "w").write("x")
-with tarfile.open(good, "w") as tf:
-    tf.add(inner, arcname="images/app.tar")
-ok, detail = ex.tar_verifier()(good)
-check("valid tar passes", ok, detail)
-ok, detail = ex.tar_verifier(["images/app.tar"])(good)
-check("expected entry found", ok, detail)
-ok, detail = ex.tar_verifier(["images/llm.tar"])(good)
-check("missing expected entry fails", not ok and "missing" in detail, detail)
-bad = os.path.join(tmp, "bad.tar"); open(bad, "wb").write(b"not a tar at all")
-ok, detail = ex.tar_verifier()(bad)
-check("corrupt tar fails", not ok, detail[:60])
-ok, detail = ex.tar_verifier()(os.path.join(tmp, "nope.tar"))
-check("absent file fails", not ok, detail[:50])
+# -- a missing scanner is an error, not an empty result ----------------------
 
-print("\n[5] publisher refuses without credentials, never pretends")
-for k in ("ARTIFACTORY_USER", "ARTIFACTORY_TOKEN"):
-    os.environ.pop(k, None)
-ok, detail = ex.artifactory_publisher("https://art.example.com", "auditbox/releases")(good, "3.24")
-check("no credentials -> not ok", ok is False, detail[:60])
-check("says where credentials come from", "environment" in detail, detail[:90])
+@pytest.mark.skipif(ex.tool_available("grype"), reason="grype is installed here")
+def test_a_missing_scanner_raises_and_offers_the_honest_alternative():
+    with pytest.raises(ex.ExecutorError) as e:
+        ex.grype_scanner("some:image")()
+    assert "run_sca: false" in str(e.value), str(e.value)
 
-print("\n[6] a missing binary raises a clear error, not a traceback")
-try:
-    ex._run(["definitely-not-a-real-binary-xyz"])
-    check("unknown binary raises", False, "no raise")
-except ex.ExecutorError as e:
-    check("unknown binary raises", "not installed" in str(e), str(e)[:60])
 
-print("\n[7] tool detection")
-check("python is detectable", ex.tool_available("python") or ex.tool_available("python3") or True)
-check("nonsense tool is not", not ex.tool_available("definitely-not-real-xyz"))
+# -- bundler refuses when the script is not in the repo ----------------------
 
-print(f"\n{'='*62}\n  {P} passed, {F} failed")
-sys.exit(1 if F else 0)
+def test_the_bundler_refuses_without_the_product_script(tmp_path):
+    ok, path, detail = ex.bundle_builder(str(tmp_path), str(tmp_path), "3.24")("full")
+    assert ok is False, detail
+    assert "product repository" in detail, detail
+
+
+# -- tar verification --------------------------------------------------------
+
+@pytest.fixture
+def good_tar(tmp_path):
+    inner = tmp_path / "app.txt"
+    inner.write_text("x")
+    path = tmp_path / "good.tar"
+    with tarfile.open(path, "w") as tf:
+        tf.add(str(inner), arcname="images/app.tar")
+    return str(path)
+
+
+def test_a_valid_tar_passes(good_tar):
+    ok, detail = ex.tar_verifier()(good_tar)
+    assert ok, detail
+
+
+def test_an_expected_entry_is_found(good_tar):
+    ok, detail = ex.tar_verifier(["images/app.tar"])(good_tar)
+    assert ok, detail
+
+
+def test_a_missing_expected_entry_fails(good_tar):
+    """Catching this here saves another multi-gigabyte transfer to the site."""
+    ok, detail = ex.tar_verifier(["images/llm.tar"])(good_tar)
+    assert not ok and "missing" in detail, detail
+
+
+def test_a_corrupt_tar_fails(tmp_path):
+    bad = tmp_path / "bad.tar"
+    bad.write_bytes(b"not a tar at all")
+    ok, detail = ex.tar_verifier()(str(bad))
+    assert not ok, detail
+
+
+def test_an_absent_file_fails(tmp_path):
+    ok, detail = ex.tar_verifier()(str(tmp_path / "nope.tar"))
+    assert not ok, detail
+
+
+# -- publisher refuses without credentials, never pretends -------------------
+
+def test_the_publisher_refuses_without_credentials(monkeypatch, good_tar):
+    monkeypatch.delenv("ARTIFACTORY_USER", raising=False)
+    monkeypatch.delenv("ARTIFACTORY_TOKEN", raising=False)
+    ok, detail = ex.artifactory_publisher(
+        "https://art.example.com", "auditbox/releases")(good_tar, "3.24")
+    assert ok is False, detail
+    assert "environment" in detail, detail
+
+
+# -- a missing binary raises a clear error, not a traceback ------------------
+
+def test_an_unknown_binary_raises_a_clear_error():
+    with pytest.raises(ex.ExecutorError) as e:
+        ex._run(["definitely-not-a-real-binary-xyz"])
+    assert "not installed" in str(e.value), str(e.value)
+
+
+def test_tool_detection():
+    assert not ex.tool_available("definitely-not-real-xyz")

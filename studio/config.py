@@ -128,6 +128,15 @@ class BuildOptions(BaseModel):
     run_tests: bool = True
     run_sca: bool = True
     fail_on_sca_severity: str = "HIGH"
+    # Confirms the model weights are actually inside the LLM image before it
+    # ships. verify_images_tar proves the image TAG made it into the tar; it
+    # cannot see inside the layers, so a cached layer or a COPY that silently
+    # did nothing still produces an image that loads, starts, and then fails on
+    # the customer's first inference.
+    verify_models: bool = True
+    # sha256 of the finished artifact, written beside it. A truncated multi-GB
+    # transfer usually still opens as a tar.
+    write_checksum: bool = True
 
     @field_validator("fail_on_sca_severity")
     @classmethod

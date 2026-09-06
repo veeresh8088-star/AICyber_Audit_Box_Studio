@@ -44,6 +44,7 @@ class BuildReport:
     steps: List[StepResult] = field(default_factory=list)
     artifact: Optional[str] = None
     licence_key: Optional[str] = None
+    sha256: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -214,3 +215,32 @@ def step_publish(profile: Profile, artifact: str, version: str,
                           skipped=True, data={"local": artifact})
     ok, detail = publisher(artifact, version)
     return StepResult("publish", ok, detail)
+
+
+def step_verify_models(profile: Profile, verifier: Callable[[], tuple]) -> StepResult:
+    """Confirm the weights are inside the LLM image, not merely that it exists.
+
+    The product's bundler already proves every image TAG reached the images
+    tar. It cannot see into the layers, so this is the gap it leaves: an image
+    whose /models is empty saves, loads, starts, and fails at first inference,
+    after the customer has taken the whole transfer.
+    """
+    if not profile.build.verify_models:
+        return StepResult("verify models", True,
+                          "skipped by profile -- THE IMAGE MAY SHIP WITHOUT WEIGHTS",
+                          skipped=True)
+    ok, detail = verifier()
+    return StepResult("verify models", ok, detail)
+
+
+def step_checksum(profile: Profile, artifact: str,
+                  writer: Callable[[str], tuple]) -> StepResult:
+    """Write a sha256 beside the artifact for the customer to check on arrival.
+
+    Not a gate on anything: it is the evidence that what arrived is what left.
+    A truncated multi-gigabyte transfer commonly still opens as a tar.
+    """
+    if not profile.build.write_checksum:
+        return StepResult("checksum", True, "skipped by profile", skipped=True)
+    ok, digest, detail = writer(artifact)
+    return StepResult("checksum", ok, detail, data={"sha256": digest} if ok else {})

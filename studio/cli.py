@@ -186,8 +186,19 @@ def cmd_build(args) -> int:
         return 8
     bundle_path = step.data["path"]
 
-    # 7 verify before anyone ships it
-    if not add(pl._timed(lambda: pl.step_verify(bundle_path, ex.tar_verifier()), "verify")):
+    # 7 verify before anyone ships it. The expectation list is the point: an
+    # empty one only proved the tar opened, so a bundle missing the images tar
+    # -- the only part that matters -- passed and would have been published.
+    if not add(pl._timed(lambda: pl.step_verify(
+            bundle_path, ex.tar_verifier(ex.bundle_expectations(shape, args.version))),
+            "verify")):
+        return 9
+
+    # 7b the weights, which no other check can see: verify_images_tar proves the
+    # image tag is in the tar, never that /models inside it is populated.
+    if not add(pl._timed(lambda: pl.step_verify_models(
+            p, ex.image_model_verifier(f"aicyberauditbox-llm:{args.version}")),
+            "verify models")):
         return 9
 
     # 8 licence
@@ -208,6 +219,12 @@ def cmd_build(args) -> int:
             return 11
         artifact = enc_path
     report.artifact = artifact
+
+    # 9b sha256 of whatever actually ships, encrypted or not
+    step = pl._timed(lambda: pl.step_checksum(p, artifact, ex.checksum_writer()), "checksum")
+    if not add(step):
+        return 11
+    report.sha256 = step.data.get("sha256")
 
     # 10 publish
     publisher = (ex.artifactory_publisher(args.artifactory, args.artifactory_repo)

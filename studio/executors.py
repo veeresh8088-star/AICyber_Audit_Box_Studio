@@ -241,3 +241,117 @@ def artifactory_publisher(base_url: str, repo_path: str,
             return False, f"upload failed: {exc}"
         return True, f"published as {name}"
     return run
+
+
+# -- what a bundle must contain -----------------------------------------------
+
+def bundle_expectations(shape: str, version: str) -> List[str]:
+    """The entries that must be inside the bundle tar, by shape.
+
+    step_verify was being handed an empty expectation list, so it only ever
+    proved the tar opened and was not empty. A bundle missing the images tar
+    entirely -- the multi-gigabyte part, the only part that matters -- passed
+    that check and would have been published.
+
+    Names are matched as substrings, so the version-stamped prefix directory
+    does not have to be reproduced exactly here.
+    """
+    if shape == "patch":
+        return [
+            f"AICyberAuditBox-{version}-patch",
+            "apply_patch.sh",
+            "apply_patch.bat",
+            "Dockerfile.app.rebase",
+            "src/",
+        ]
+    return [
+        f"AICyberAuditBox-{version}",
+        f"aicyberauditbox-images-{version}.tar",   # the images; without it nothing runs
+        "docker-compose.yml",
+        "install.sh",
+        "install.bat",
+        f"INSTALL_v{version}.md",
+    ]
+
+
+# -- are the weights actually in the image? -----------------------------------
+
+DEFAULT_MODELS = (
+    "gemma-4-12B-it-Q8_0.gguf",
+    "google_gemma-4-E4B-it-Q4_K_M.gguf",
+    "nomic-embed-text-v1.5.f16.gguf",
+)
+
+
+def image_model_verifier(llm_tag: str, expected: Optional[List[str]] = None,
+                         min_bytes: int = 100 * 1024 * 1024) -> Callable:
+    """Look inside the built LLM image and confirm the weights are there.
+
+    Dockerfile.llm COPYs three .gguf into /models. verify_images_tar in the
+    product's bundler confirms the image tag reached the tar; it cannot see
+    into the layers. A cached layer, a renamed weight file or a COPY whose
+    source was absent still yields an image that loads and starts -- and then
+    fails on the customer's first inference, after the whole transfer.
+
+    Runs against the local image on the build machine, where it was just built,
+    so this costs one container start rather than a scan of several GB of tar.
+    """
+    def run():
+        if not tool_available("docker"):
+            raise ExecutorError(
+                "docker is not installed or not on PATH, so the model weights "
+                "inside the LLM image cannot be checked. Install it, or set "
+                "verify_models: false in the profile and accept that a bundle "
+                "can ship an image whose /models directory is empty."
+            )
+        want = list(expected or DEFAULT_MODELS)
+        code, out = _run(["docker", "run", "--rm", "--entrypoint", "sh", llm_tag,
+                          "-c", "ls -l /models 2>/dev/null || true"], timeout=300)
+        if code != 0:
+            return False, f"could not inspect {llm_tag}: {out[-200:]}"
+        listing = out or ""
+        missing, undersized = [], []
+        for name in want:
+            line = next((l for l in listing.splitlines() if name in l), None)
+            if line is None:
+                missing.append(name)
+                continue
+            size = next((int(tok) for tok in line.split() if tok.isdigit()
+                         and int(tok) > 1024), 0)
+            if size < min_bytes:
+                undersized.append(f"{name} ({size:,} bytes)")
+        if missing:
+            return False, ("model weights absent from the image: "
+                           + ", ".join(missing)
+                           + " -- the image would start and fail at first inference")
+        if undersized:
+            # A weight file that exists but is tiny is the signature of a COPY
+            # that picked up a Git LFS pointer rather than the real file.
+            return False, "model weights are implausibly small: " + ", ".join(undersized)
+        return True, f"{len(want)} model weight(s) present in {llm_tag}"
+    return run
+
+
+# -- integrity of the finished artifact ---------------------------------------
+
+def checksum_writer() -> Callable:
+    """Write a sha256 beside the artifact.
+
+    A transfer that truncates a multi-gigabyte tar very often leaves something
+    that still opens as a tar, so "it extracted" is not evidence it arrived
+    whole. The customer checks this figure before spending an install on it.
+    """
+    def run(path: str):
+        import hashlib
+        if not os.path.isfile(path):
+            return False, None, f"no artifact at {path}"
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(8 * 1024 * 1024), b""):
+                h.update(block)
+        digest = h.hexdigest()
+        side = path + ".sha256"
+        with open(side, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(f"{digest}  {os.path.basename(path)}\n")
+        return True, digest, f"sha256 {digest[:16]}... written to {os.path.basename(side)}"
+    return run

@@ -140,15 +140,35 @@ def test_a_build_that_does_not_import_is_refused(monkeypatch, tmp_path):
     assert "does not import" in detail, detail
 
 
-def test_a_successful_build_reports_the_image(monkeypatch, tmp_path):
+def test_a_successful_build_reports_the_image_and_its_data(monkeypatch, tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     (out / "src.cpython-311-x86_64-linux-gnu.so").write_bytes(b"\x7fELF")
+    # Nuitka compiles code, not data. A repo with assets is the real case.
+    (tmp_path / "src" / "api" / "static").mkdir(parents=True)
+    (tmp_path / "src" / "api" / "static" / "index.html").write_text("<html>")
     monkeypatch.setattr(ex, "tool_available", lambda name: name == "docker")
-    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "...\nNUITKA_IMPORT_OK\n"))
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "NUITKA_IMPORT_OK"))
     ok, detail = ex.nuitka_compiler(str(tmp_path), str(out))()
     assert ok, detail
     assert "python:3.11-slim" in detail and "imported" in detail, detail
+    assert "1 data file" in detail, detail
+    assert (out / "src" / "api" / "static" / "index.html").exists(), "asset not staged"
+
+
+def test_a_compile_with_no_data_files_is_refused(monkeypatch, tmp_path):
+    """It imported, then died on RuntimeError: Directory 'src/api/static'
+    does not exist. Compiling is not the same as being shippable."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "src.cpython-311-x86_64-linux-gnu.so").write_bytes(b"\x7fELF")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "only.py").write_text("x = 1")
+    monkeypatch.setattr(ex, "tool_available", lambda name: name == "docker")
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "NUITKA_IMPORT_OK"))
+    ok, detail = ex.nuitka_compiler(str(tmp_path), str(out))()
+    assert ok is False
+    assert "relative path" in detail, detail
 
 
 def test_producing_nothing_is_a_failure(monkeypatch, tmp_path):

@@ -72,6 +72,15 @@ def run_chain(profile: Profile, ctx: ChainContext, *, repo: str, version: str,
     ctx.shape = step.data.get("shape", "full")
     patch_from = step.data.get("from")
 
+    # 1a the tree itself. Before anything else, because every later step is
+    # reasoning about a version that must actually be what gets built.
+    from studio.packaging import uncommitted_changes
+    step = record(pl._timed(
+        lambda: pl.step_working_tree(repo, uncommitted_changes), "working tree"))
+    yield step
+    if not step.ok:
+        return
+
     # 1b the verifying key. Cheap, and a bundle without it is unusable at the
     # customer site whatever else is right, so it goes before the slow steps.
     step = record(pl._timed(

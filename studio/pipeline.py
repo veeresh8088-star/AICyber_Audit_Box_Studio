@@ -119,6 +119,25 @@ def step_resolve_shape(profile: Profile, repo: str, version: str,
                       data={"shape": d.shape, "from": base if d.legal else None})
 
 
+def step_working_tree(repo: str, lister) -> StepResult:
+    """Refuse to build from a tree that does not match what git was asked about.
+
+    The shape decision comes from a git diff; the images are built from the
+    files on disk. A modified, uncommitted file is in the second and not the
+    first, so it ships without ever being considered -- and if it is
+    requirements.txt or a Dockerfile, it ships inside a patch that was declared
+    legal precisely because git saw no such change.
+    """
+    dirty = lister(repo)
+    if dirty:
+        shown = ", ".join(dirty[:5]) + (" and %d more" % (len(dirty) - 5) if len(dirty) > 5 else "")
+        return StepResult("working tree", False,
+                          "uncommitted changes would be built but were not part of the "
+                          "version comparison: " + shown +
+                          ". Commit or stash them, then build.")
+    return StepResult("working tree", True, "clean, so what git compared is what gets built")
+
+
 def step_sizing(profile: Profile, sizer: Callable) -> StepResult:
     """Compute the customer's llama-server settings from their hardware."""
     s = sizer(

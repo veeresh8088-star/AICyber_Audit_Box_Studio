@@ -400,3 +400,70 @@ def test_shared_layers_are_counted_once(monkeypatch):
     total = ex.estimate_bundle_gb(["app:1", "llm:1", "llm-embed:1"])
     # 2 + 18, not 2 + 18 + 18
     assert total == 20.0, total
+
+
+# -- what git compared must be what gets built -------------------------------
+# The shape decision comes from a git diff between two versions. The images are
+# built by docker from the files on disk. A modified, uncommitted file is in the
+# second and not the first: it ships without ever being considered, and if it is
+# requirements.txt or a Dockerfile it ships inside a patch that was declared
+# legal precisely because git saw no such change.
+
+def _repo(tmp_path):
+    import subprocess
+    r = tmp_path / "r"
+    r.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(r), *a], capture_output=True, text=True)
+
+    git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    (r / "src").mkdir()
+    (r / "src" / "a.py").write_text("1")
+    (r / "requirements.txt").write_text("a==1\n")
+    git("add", "-A"); git("commit", "-qm", "1")
+    return r, git
+
+
+def test_a_clean_tree_passes(tmp_path):
+    from studio.packaging import uncommitted_changes
+    r, _ = _repo(tmp_path)
+    assert uncommitted_changes(str(r)) == []
+    step = pl.step_working_tree(str(r), uncommitted_changes)
+    assert step.ok and "clean" in step.detail
+
+
+def test_an_uncommitted_change_stops_the_build(tmp_path):
+    from studio.packaging import uncommitted_changes
+    r, _ = _repo(tmp_path)
+    (r / "requirements.txt").write_text("a==2\n")      # would ship, invisible to the diff
+    dirty = uncommitted_changes(str(r))
+    assert "requirements.txt" in dirty, dirty
+    step = pl.step_working_tree(str(r), uncommitted_changes)
+    assert not step.ok
+    assert "requirements.txt" in step.detail
+    assert "Commit or stash" in step.detail
+
+
+def test_untracked_files_count_too(tmp_path):
+    """docker build copies them; git diff does not mention them."""
+    from studio.packaging import uncommitted_changes
+    r, _ = _repo(tmp_path)
+    (r / "src" / "sneaky.py").write_text("print('shipped')")
+    assert any("sneaky" in f for f in uncommitted_changes(str(r)))
+
+
+def test_the_message_names_the_files_not_just_a_count(tmp_path):
+    from studio.packaging import uncommitted_changes
+    r, _ = _repo(tmp_path)
+    for n in range(8):
+        (r / ("f%d.txt" % n)).write_text("x")
+    step = pl.step_working_tree(str(r), uncommitted_changes)
+    assert not step.ok
+    assert "and 3 more" in step.detail, step.detail
+
+
+def test_a_non_repository_does_not_block(tmp_path):
+    """No git, no claim either way -- this gate must not invent a failure."""
+    from studio.packaging import uncommitted_changes
+    assert uncommitted_changes(str(tmp_path)) == []

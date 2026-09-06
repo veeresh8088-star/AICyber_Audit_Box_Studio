@@ -144,6 +144,25 @@ class PatchDecision:
     reason: str
 
 
+def uncommitted_changes(repo_path: str) -> List[str]:
+    """Files changed on disk but not committed.
+
+    The shape decision reads git; docker build reads the working tree. Anything
+    modified and not committed is therefore built into the bundle while being
+    invisible to the diff that decided whether a patch was legal. An uncommitted
+    requirements.txt would ship inside an "app code only" patch that cannot
+    install it.
+    """
+    try:
+        out = subprocess.run(["git", "-C", repo_path, "status", "--porcelain"],
+                             capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    return sorted(line[3:].strip() for line in out.stdout.splitlines() if line.strip())
+
+
 def patch_is_legal(repo_path: str, from_ref: str, to_ref: str,
                    model_changed: bool = False) -> PatchDecision:
     """Decide whether a patch from from_ref to to_ref can apply.

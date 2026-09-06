@@ -145,6 +145,55 @@ def grype_scanner(target: str) -> Callable:
 
 # ── compile ──────────────────────────────────────────────────────────────────
 
+# Files under src/ that Nuitka does not carry and the app cannot start without.
+# Discovered, not listed: a hardcoded list drifts, and the failure it produces is
+# an app that loads and then dies looking for a template or a knowledge file.
+# Caches are excluded -- .embeddings_cache.pkl is 23 MB, regenerated on demand,
+# and shipping a stale one is worse than shipping none.
+_ASSET_SKIP_DIRS = ("__pycache__", ".git", "build", "dist")
+_ASSET_SKIP_NAMES = (".embeddings_cache.pkl",)
+
+
+def source_assets(repo: str, package: str = "src") -> List[str]:
+    """Every non-Python file under the package, relative to the repo."""
+    found = []
+    root = os.path.join(repo, package)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _ASSET_SKIP_DIRS]
+        for name in filenames:
+            if name.endswith(".py") or name in _ASSET_SKIP_NAMES:
+                continue
+            full = os.path.join(dirpath, name)
+            found.append(os.path.relpath(full, repo).replace("\\", "/"))
+    return sorted(found)
+
+
+def stage_assets(repo: str, out_dir: str, package: str = "src") -> Tuple[int, List[str]]:
+    """Copy those files next to the compiled module, keeping their paths.
+
+    Nuitka compiles code, not data. Compiling src/ and shipping only the .so
+    produced an app that imported cleanly and then raised
+
+        RuntimeError: Directory 'src/api/static' does not exist
+
+    on the FastAPI mount, having already warned that four knowledge JSON files
+    were missing. The layout has to survive because the code opens these by
+    relative path.
+    """
+    import shutil
+    copied, failed = 0, []
+    for rel in source_assets(repo, package):
+        src_path = os.path.join(repo, rel)
+        dst_path = os.path.join(out_dir, rel)
+        try:
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+            shutil.copy2(src_path, dst_path)
+            copied += 1
+        except OSError as exc:
+            failed.append("%s (%s)" % (rel, exc))
+    return copied, failed
+
+
 def nuitka_compiler(repo: str, out_dir: str, packages: Optional[List[str]] = None,
                     image: str = "python:3.11-slim", timeout: int = 7200) -> Callable:
     """Compile src/ to native modules INSIDE the image the product ships on.
@@ -198,7 +247,18 @@ def nuitka_compiler(repo: str, out_dir: str, packages: Optional[List[str]] = Non
         if "NUITKA_IMPORT_OK" not in out:
             return False, ("%s built but does not import -- refusing to ship a module "
                            "that fails at load. %s" % (produced[0], out[-200:]))
-        return True, "%d native module(s) built in %s and imported" % (len(produced), image)
+        # The compiled module is not the whole package: templates, static files
+        # and the knowledge JSON are opened by relative path at runtime.
+        copied, failed = stage_assets(repo, out_dir, (packages or ["src"])[0])
+        if failed:
+            return False, "compiled, but these assets could not be staged: %s" % (
+                ", ".join(failed[:4]))
+        if not copied:
+            return False, ("compiled, but no data files were staged beside it. The app "
+                           "opens its templates and knowledge files by relative path "
+                           "and will start and then fail without them.")
+        return True, "%d native module(s) built in %s, imported, with %d data file(s)" % (
+            len(produced), image, copied)
     return run
 
 

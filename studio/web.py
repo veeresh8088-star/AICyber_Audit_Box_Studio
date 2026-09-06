@@ -39,7 +39,7 @@ from studio.sizing import size_for_profile
 # process loaded at start. That combination shows an operator new buttons wired
 # to endpoints that answer "not found", which looks like a broken feature rather
 # than a stale server. The page checks this and says which it is.
-API_VERSION = 4
+API_VERSION = 5
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -491,18 +491,30 @@ class Handler(BaseHTTPRequestHandler):
         shape, reason = p.bundle.value, ""
         base = p.patch_from or previous
         if p.bundle in (BundleShape.AUTO, BundleShape.PATCH) and base:
+            # The version being BUILT normally has no tag yet -- that is the
+            # ordinary case, not a mistake: you tag a release when you cut it.
+            # Requiring it up front made the tool unusable for its main job. When
+            # it is absent, compare against the working tree instead and say so,
+            # which is the question actually being asked: what has changed since
+            # the version this customer is on?
+            tags = known_versions(self.repo)
+            target, against_head = version, False
+            if version not in tags:
+                target, against_head = "HEAD", True
             try:
-                d = patch_is_legal(self.repo, base, version)
+                d = patch_is_legal(self.repo, base, target)
+                if against_head:
+                    d = d._replace(reason=d.reason.replace("HEAD", "your current code"))                         if hasattr(d, "_replace") else d
             except PackagingError as exc:
                 # git's own wording here is about ambiguous arguments and
                 # separating paths from revisions. True, and useless to the
                 # person who simply mistyped a version.
-                tags = known_versions(self.repo)
-                missing = [v for v in (base, version) if v not in tags]
-                if missing and tags:
-                    return {"error": "There is no version %s in the repository. "
-                                     "Versions that exist: %s"
-                                     % (" or ".join(missing), ", ".join(tags))}
+                # Only the version the customer is ON has to exist. Listed once
+                # even when both fields carry it, which read as "v3.25 or v3.25".
+                if base not in tags and tags:
+                    return {"error": "The customer is not on version %s -- there is no "
+                                     "such version in the repository. Versions that "
+                                     "exist: %s" % (base, ", ".join(tags))}
                 if not tags:
                     return {"error": "The product repository has no version tags yet, "
                                      "so there is nothing to compare against. Tag a "

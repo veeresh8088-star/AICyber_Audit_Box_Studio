@@ -393,3 +393,55 @@ def test_every_error_path_on_the_page_is_visible_as_an_error():
         html = fh.read()
     assert html.count('className = "err"') == 4, (
         "an error path renders as a muted note rather than a refusal")
+
+
+# -- the version you are building does not exist yet -------------------------
+# That is the ordinary case: a release is tagged when it is cut, so the version
+# in "new version to build" has no tag while you are planning it. Requiring one
+# made the tool refuse its own main job, with "There is no version v3.25 or
+# v3.25" -- which also named the same version twice, because both fields
+# carried it and only one of them ever had to exist.
+
+def _repo_with_tag(tmp_path):
+    import subprocess
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    (repo / "src").mkdir()
+    (repo / "src" / "a.py").write_text("1")
+    (repo / "requirements.txt").write_text("a==1\n")
+    git("add", "-A"); git("commit", "-qm", "v3.24"); git("tag", "v3.24")
+    return repo, git
+
+
+def test_an_untagged_target_is_compared_against_the_working_tree(tmp_path):
+    """What has changed since the version this customer is on -- the real question."""
+    from studio.packaging import patch_is_legal
+    repo, git = _repo_with_tag(tmp_path)
+    (repo / "src" / "a.py").write_text("2")          # code moved, not tagged yet
+    git("add", "-A"); git("commit", "-qm", "wip")
+    d = patch_is_legal(str(repo), "v3.24", "HEAD")
+    assert d.legal and d.shape == "patch", d.reason
+
+
+def test_an_untagged_target_still_refuses_an_illegal_patch(tmp_path):
+    """Comparing against the working tree must not loosen the rule."""
+    from studio.packaging import patch_is_legal
+    repo, git = _repo_with_tag(tmp_path)
+    (repo / "requirements.txt").write_text("a==2\n")
+    git("add", "-A"); git("commit", "-qm", "dep bump")
+    d = patch_is_legal(str(repo), "v3.24", "HEAD")
+    assert not d.legal and d.shape == "full", d.reason
+    assert "requirements.txt" in d.blocking_changes
+
+
+def test_only_the_customers_version_has_to_exist():
+    """The error names one version, not the same one twice."""
+    import inspect
+    src = inspect.getsource(web.Handler._plan)
+    assert "The customer is not on version" in src
+    assert '" or ".join(missing)' not in src, "the duplicated wording is back"

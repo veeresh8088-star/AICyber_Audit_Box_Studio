@@ -1,0 +1,36 @@
+# vb -- created in the release studio.
+# Version-controlled deliberately: a change to what this customer is licensed
+# for, or how much of their machine we use, becomes a reviewable commit.
+schema_version: 1
+
+licence:
+  customer: vb
+  expires: 2026-09-16
+  frameworks: [ISO27001]
+  seats: 5
+
+hardware:
+  physical_cores: 8
+  ram_gb: 32
+  ctx_per_request: 32768
+
+model: google_gemma-4-E4B-it-Q4_K_M.gguf
+
+bundle: auto
+
+runtime:
+  max_audits_per_auditor: 2
+  remediation_batch_size: 4
+  remediation_timeout_sec: 1800
+  ai_recommendations_default: true
+  jwt_expiry_hours: 8
+  locked: []                 # frameworks are never here; they are licence-controlled
+
+build:
+  compile_source: true
+  encrypt_bundle: true
+  run_tests: true
+  run_sca: true
+  fail_on_sca_severity: HIGH
+  verify_models: true
+  write_checksum: true

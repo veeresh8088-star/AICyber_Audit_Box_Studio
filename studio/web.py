@@ -248,6 +248,25 @@ def create_profile(directory: str, data: dict) -> dict:
     frameworks = [f for f in (data.get("frameworks") or []) if f]
     if not frameworks:
         return {"error": "a licence has to grant at least one framework"}
+    # Checked here, in words, rather than left to pydantic. An empty date field
+    # produced "1 validation error for Profile / licence.expires / Input should
+    # be a valid date [type=date_type, input_value=None]", which is accurate and
+    # unreadable, and an empty date is the likeliest mistake on this form.
+    import datetime as _dt
+    raw = str(data.get("expires") or "").strip()
+    if not raw:
+        return {"error": "Pick the date this customer's licence expires."}
+    try:
+        expires = _dt.date.fromisoformat(raw)
+    except ValueError:
+        return {"error": "%s is not a date the licence can use. Expected "
+                         "YYYY-MM-DD." % raw}
+    if expires <= _dt.date.today():
+        # It would build, sign, ship, and refuse to run on arrival.
+        when = ("expires today" if expires == _dt.date.today()
+                else "expired on %s" % expires.isoformat())
+        return {"error": "That licence %s. The customer's installation would "
+                         "refuse every framework the day it arrived." % when}
     body = PROFILE_TEMPLATE.format(
         customer=data.get("customer"), expires=data.get("expires"),
         frameworks=_yaml_value(frameworks), seats=int(data.get("seats") or 1),

@@ -332,3 +332,64 @@ def test_an_invented_framework_is_still_refused(tmp_path):
     res = web.create_profile(str(d), {"customer": "X", "expires": "2027-01-01",
                                       "frameworks": ["HIPAA"]})
     assert "error" in res, "HIPAA was accepted"
+
+
+# -- the dates a person actually types ---------------------------------------
+# An empty expiry field -- the likeliest mistake on the form -- produced
+# "1 validation error for Profile / licence.expires / Input should be a valid
+# date [type=date_type, input_value=None]". Accurate, unreadable, and shown to
+# the person this page exists for.
+
+def _mk(tmp_path):
+    d = tmp_path / "p"
+    d.mkdir()
+    return str(d)
+
+
+def test_an_empty_expiry_says_what_to_do(tmp_path):
+    res = web.create_profile(_mk(tmp_path),
+                             {"customer": "A", "expires": "", "frameworks": ["ISO27001"]})
+    assert res["error"] == "Pick the date this customer's licence expires."
+
+
+def test_a_date_in_the_wrong_format_says_which_format(tmp_path):
+    res = web.create_profile(_mk(tmp_path),
+                             {"customer": "A", "expires": "24/09/2026",
+                              "frameworks": ["ISO27001"]})
+    assert "YYYY-MM-DD" in res["error"], res
+
+
+def test_an_expired_licence_is_refused_not_built(tmp_path):
+    """It would build, sign, ship, and refuse to run on arrival."""
+    res = web.create_profile(_mk(tmp_path),
+                             {"customer": "A", "expires": "2020-01-01",
+                              "frameworks": ["ISO27001"]})
+    assert "expired on 2020-01-01" in res["error"], res
+    assert "refuse every framework" in res["error"], res
+
+
+def test_a_licence_expiring_today_is_refused_and_worded_correctly(tmp_path):
+    """"already passed" is wrong for today, and the message said so."""
+    import datetime
+    res = web.create_profile(_mk(tmp_path),
+                             {"customer": "A", "expires": datetime.date.today().isoformat(),
+                              "frameworks": ["ISO27001"]})
+    assert "expires today" in res["error"], res
+    assert "already passed" not in res["error"], res
+
+
+def test_a_good_date_is_accepted(tmp_path):
+    import datetime
+    future = (datetime.date.today() + datetime.timedelta(days=365)).isoformat()
+    res = web.create_profile(_mk(tmp_path),
+                             {"customer": "Dhiware", "expires": future,
+                              "frameworks": ["ISO27001"], "seats": 2})
+    assert res.get("created") == "dhiware.yaml", res
+
+
+def test_every_error_path_on_the_page_is_visible_as_an_error():
+    """Grey text reads as a note. A refusal has to look like one."""
+    with open(web.PAGE, encoding="utf-8") as fh:
+        html = fh.read()
+    assert html.count('className = "err"') == 4, (
+        "an error path renders as a muted note rather than a refusal")

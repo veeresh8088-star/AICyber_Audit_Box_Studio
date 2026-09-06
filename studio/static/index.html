@@ -59,6 +59,7 @@
   .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all}
   .hide{display:none}
   .muted{color:var(--muted)}
+  .err{color:var(--bad);font-weight:600}
   .row{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end}
   .shape{display:flex;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .shape button{background:#1b1f2b;color:var(--muted);border:0;border-right:1px solid var(--line);
@@ -213,7 +214,8 @@ async function resize(){
     headers:{"Content-Type":"application/json"},
     body: JSON.stringify({cores:c, ram_gb:r, ctx:x})});
   const d = await res.json();
-  if (d.error){ out.textContent = d.error; return; }
+  if (d.error){ out.className = "err"; out.textContent = d.error; return; }
+  out.className = "muted";
   const s = d.sizing;
   out.textContent =
     "-np " + s.np_slots + "   -c " + s.shared_pool.toLocaleString() +
@@ -234,7 +236,8 @@ async function saveHw(){
     headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
   const d = await r.json();
   const out = document.getElementById("hw-out");
-  if (d.error){ out.textContent = "not saved: " + d.error; return; }
+  if (d.error){ out.className = "err"; out.textContent = "not saved: " + d.error; return; }
+  out.className = "out";
   if (d.summary && d.summary.valid){
     const i = PROFILES.findIndex(p => p.file === SELECTED.file);
     if (i >= 0){ PROFILES[i] = d.summary; SELECTED = d.summary; }
@@ -366,7 +369,8 @@ async function saveLicence(){
     headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
   const d = await r.json();
   const out = document.getElementById("lic-out");
-  if (d.error){ out.textContent = d.error; return; }
+  if (d.error){ out.className = "err"; out.textContent = d.error; return; }
+  out.className = "muted";
   if (d.summary && d.summary.valid){
     const i = PROFILES.findIndex(x => x.file === SELECTED.file);
     if (i >= 0){ PROFILES[i] = d.summary; SELECTED = d.summary; }
@@ -389,7 +393,8 @@ async function createCustomer(){
     headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
   const d = await r.json();
   const out = document.getElementById("nc-out");
-  if (d.error){ out.textContent = d.error; return; }
+  if (d.error){ out.className = "err"; out.textContent = d.error; return; }
+  out.className = "muted";
   out.textContent = "created " + d.created;
   await setShape("auto");
 load();

@@ -283,3 +283,52 @@ def test_every_bundle_shape_is_explained_on_the_page():
         assert word in html, "the shape explanation lost: %s" % word
     # The buttons say what happens, not what the code calls it.
     assert "App code only" in html and "Everything" in html
+
+
+# -- the frameworks on offer are the ones that exist -------------------------
+# The page carried a hand-written list. It offered PCIDSS and HIPAA, which this
+# product has never audited, and left out DPDP, BCMS and XBOM, which it does.
+# Ticking an invented one produced a profile that failed validation; leaving out
+# a real one meant a customer could not be sold something we can deliver.
+
+def test_the_page_does_not_carry_its_own_framework_list():
+    with open(web.PAGE, encoding="utf-8") as fh:
+        html = fh.read()
+    # Comments are excluded: the one above the fetch names PCIDSS and HIPAA
+    # precisely to record that they do not exist, and matching that is how the
+    # first version of this test failed.
+    code = "\n".join(l for l in html.splitlines() if not l.strip().startswith("//"))
+    for invented in ("PCIDSS", "HIPAA"):
+        assert invented not in code, "%s is on the page and does not exist" % invented
+    assert "let FRAMEWORKS = []" in code, "the list is hardcoded again"
+
+
+def test_every_framework_is_labelled_for_a_customer():
+    """An operator is deciding what a site is sold, not reading an enum."""
+    from studio.config import Framework, FRAMEWORK_LABELS
+    for f in Framework:
+        assert f.value in FRAMEWORK_LABELS, "%s has no customer-facing name" % f.value
+        name, about, controls = FRAMEWORK_LABELS[f.value]
+        assert name and about and controls > 0, (f.value, name, about, controls)
+
+
+def test_the_labelled_control_counts_match_the_product():
+    """217 across eight frameworks -- the number the product reports itself."""
+    from studio.config import FRAMEWORK_LABELS
+    assert sum(c for _, _, c in FRAMEWORK_LABELS.values()) == 217
+
+
+def test_a_framework_the_product_has_can_be_licensed():
+    """NIST and XBOM were absent from the schema, so neither could be sold."""
+    from studio.config import Framework
+    have = {f.value for f in Framework}
+    for expected in ("ISO27001", "VAPT", "PQC", "SOC2", "DPDP", "BCMS", "NIST", "XBOM"):
+        assert expected in have, "%s cannot be licensed" % expected
+
+
+def test_an_invented_framework_is_still_refused(tmp_path):
+    d = tmp_path / "p"
+    d.mkdir()
+    res = web.create_profile(str(d), {"customer": "X", "expires": "2027-01-01",
+                                      "frameworks": ["HIPAA"]})
+    assert "error" in res, "HIPAA was accepted"

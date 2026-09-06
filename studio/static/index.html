@@ -181,7 +181,7 @@
 
 <script>
 let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto", VERSIONS = [];
-const PAGE_API = 3;   // must match web.API_VERSION; see the banner below
+const PAGE_API = 4;   // must match web.API_VERSION; see the banner below
 
 const SHAPE_MEANS = {
   auto:  "Compares the two versions and picks. Only src/ and config/ changed " +
@@ -252,6 +252,7 @@ async function load(){
   PROFILES = d.profiles || [];
   document.getElementById("repo").textContent = d.repo || "";
   VERSIONS = d.versions || [];
+  FRAMEWORKS = d.frameworks || [];
   const stale = document.getElementById("stale");
   if ((d.api_version || 0) < PAGE_API){
     stale.classList.remove("hide");
@@ -273,7 +274,7 @@ async function load(){
   if (vs) vs.textContent = VERSIONS.length
     ? "Versions in the repository: " + VERSIONS.join(", ")
     : "No version tags in the repository yet — tag a release and the patch option becomes available.";
-  boxes("nc-fw", FRAMEWORKS.map(f => [f, f]), [], "ncfw-");
+  boxes("nc-fw", FRAMEWORKS.map(f => [f.id, fwLabel(f)]), [], "ncfw-");
   renderCards();
 }
 
@@ -309,7 +310,9 @@ function pick(i){
   resize();
 }
 
-const FRAMEWORKS = ["ISO27001", "VAPT", "PQC", "SOC2", "NIST", "PCIDSS", "HIPAA", "GDPR"];
+// Filled from /api/profiles. Hardcoding this list is what put PCIDSS and
+// HIPAA on the page -- neither of which the product has ever audited.
+let FRAMEWORKS = [];
 const GATES = [
   ["compile_source",  "Compile to binaries (no readable source ships)"],
   ["encrypt_bundle",  "Encrypt the bundle"],
@@ -318,6 +321,10 @@ const GATES = [
   ["verify_models",   "Check the model weights are in the image"],
   ["write_checksum",  "Write a sha256 beside the artifact"],
 ];
+
+function fwLabel(f){
+  return f.name + (f.controls ? "  (" + f.controls + " controls)" : "");
+}
 
 function boxes(host, items, checked, prefix){
   document.getElementById(host).innerHTML = items.map(([v, label]) =>
@@ -329,7 +336,7 @@ function fillLicence(){
   document.getElementById("lic-name").value = SELECTED.customer;
   document.getElementById("lic-exp").value = SELECTED.expires;
   document.getElementById("lic-seats").value = SELECTED.seats || 1;
-  boxes("lic-fw", FRAMEWORKS.map(f => [f, f]), SELECTED.frameworks, "fw-");
+  boxes("lic-fw", FRAMEWORKS.map(f => [f.id, fwLabel(f)]), SELECTED.frameworks, "fw-");
   const g = SELECTED.gates || {};
   const on = [];
   if (g.compile) on.push("compile_source");
@@ -343,7 +350,7 @@ function fillLicence(){
 }
 
 function picked(prefix, items){
-  return items.map(i => Array.isArray(i) ? i[0] : i)
+  return items.map(i => (i && i.id) ? i.id : (Array.isArray(i) ? i[0] : i))
               .filter(v => (document.getElementById(prefix + v) || {}).checked);
 }
 

@@ -29,7 +29,7 @@ import yaml
 from pydantic import ValidationError
 
 from studio.chain import ChainContext, run_chain
-from studio.config import Profile, BundleShape
+from studio.config import Profile, BundleShape, Framework, FRAMEWORK_LABELS
 from studio.licensing import issue, private_key_from_env, LicenceError
 from studio.packaging import patch_is_legal, PackagingError
 from studio.sizing import size_for_profile
@@ -39,7 +39,7 @@ from studio.sizing import size_for_profile
 # process loaded at start. That combination shows an operator new buttons wired
 # to endpoints that answer "not found", which looks like a broken feature rather
 # than a stale server. The page checks this and says which it is.
-API_VERSION = 3
+API_VERSION = 4
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -352,6 +352,16 @@ class Handler(BaseHTTPRequestHandler):
                         "repo": os.path.abspath(self.repo),
                         "versions": known_versions(self.repo),
                         "api_version": API_VERSION,
+                        # Served, never hardcoded in the page. A hand-written
+                        # copy drifted immediately: it offered NIST, PCIDSS,
+                        # HIPAA and GDPR -- two of which the product has never
+                        # had -- and left out DPDP, BCMS and XBOM, which it has.
+                        "frameworks": [
+                            {"id": f.value,
+                             "name": FRAMEWORK_LABELS.get(f.value, (f.value, "", 0))[0],
+                             "about": FRAMEWORK_LABELS.get(f.value, (f.value, "", 0))[1],
+                             "controls": FRAMEWORK_LABELS.get(f.value, (f.value, "", 0))[2]}
+                            for f in Framework],
                         "is_git_repo": os.path.isdir(os.path.join(self.repo, ".git"))})
             return
         if path.startswith("/api/build/"):

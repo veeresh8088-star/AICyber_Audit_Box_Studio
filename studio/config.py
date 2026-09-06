@@ -27,13 +27,37 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Framework(str, Enum):
-    """Sellable audit frameworks. These are the entitlement unit."""
+    """Sellable audit frameworks. These are the entitlement unit.
+
+    All eight the product implements, checked against its own control set
+    rather than assumed: 217 controls across ISO 27001 (93), SOC 2 (33), X-BOM
+    (23), NIST CSF (22), DPDP/GDPR (15), VAPT (15), PQC (12) and BCMS (4).
+    NIST and XBOM were missing here, so a customer could not be sold two things
+    the product can actually audit.
+    """
     ISO27001 = "ISO27001"
     VAPT = "VAPT"
     PQC = "PQC"
     SOC2 = "SOC2"
     DPDP = "DPDP"
     BCMS = "BCMS"
+    NIST = "NIST"
+    XBOM = "XBOM"
+
+
+# What each one is called in front of a customer, and how much of the control
+# set it grants. An operator ticking boxes is deciding what a site is sold, so
+# the page shows this rather than a six-letter enum name.
+FRAMEWORK_LABELS = {
+    "ISO27001": ("ISO/IEC 27001:2022", "Information Security Management", 93),
+    "NIST":     ("NIST CSF 2.0", "Cybersecurity Framework Core", 22),
+    "DPDP":     ("DPDP / GDPR", "Digital Data Protection and EU GDPR", 15),
+    "SOC2":     ("SOC 2 Type II", "System and Organization Controls", 33),
+    "BCMS":     ("ISO 22301 BCMS", "Business Continuity Management", 4),
+    "XBOM":     ("X-BOM / SBOM", "Software Bill of Materials", 23),
+    "VAPT":     ("VAPT", "Vulnerability Assessment and Penetration Testing", 15),
+    "PQC":      ("PQC", "Post-Quantum Cryptography Readiness", 12),
+}
 
 
 class ModelChoice(str, Enum):

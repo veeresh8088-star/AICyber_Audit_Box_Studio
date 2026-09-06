@@ -140,3 +140,36 @@ def test_editing_a_profile_with_no_hardware_block_says_so(tmp_path):
     p = tmp_path / "x.yaml"
     p.write_text("licence:\n  customer: ACME\n")
     assert "error" in web.set_hardware(str(p), {"physical_cores": 8})
+
+
+# -- versions the operator can act on ----------------------------------------
+# Typing v3.2 for v3.24 produced git's own words: "fatal: ambiguous argument
+# 'v3.2..v3.25': unknown revision or path not in the working tree. Use '--' to
+# separate paths from revisions". Accurate, and no use at all to the person who
+# simply mistyped a version -- which is the person this page is for.
+
+def test_known_versions_reads_the_repository_tags(tmp_path):
+    import subprocess
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    (repo / "a.txt").write_text("1")
+    git("add", "-A"); git("commit", "-qm", "1"); git("tag", "v3.24")
+    assert web.known_versions(str(repo)) == ["v3.24"]
+
+
+def test_a_repository_with_no_tags_returns_nothing(tmp_path):
+    """Not an error: the page says the patch path is unavailable until tagged."""
+    import subprocess
+    repo = tmp_path / "empty"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True)
+    assert web.known_versions(str(repo)) == []
+
+
+def test_known_versions_of_a_non_repository_is_empty_not_a_crash(tmp_path):
+    assert web.known_versions(str(tmp_path)) == []

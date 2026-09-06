@@ -118,11 +118,13 @@
       </div>
       <div>
         <label for="previous">Version the customer is on</label>
-        <input id="previous" placeholder="v3.24" autocomplete="off">
+        <input id="previous" placeholder="v3.24" autocomplete="off" list="known">
+        <datalist id="known"></datalist>
       </div>
       <button class="ghost" id="btn-plan" onclick="doPlan()">Check first</button>
       <button id="btn-build" onclick="doBuild()">Build</button>
     </form>
+    <div class="muted" id="versions" style="font-size:12px;margin-top:6px"></div>
     <div id="plan"></div>
 
     <div id="progress" class="hide">
@@ -134,7 +136,7 @@
 </main>
 
 <script>
-let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto";
+let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto", VERSIONS = [];
 
 function setShape(s){
   SHAPE = s;
@@ -191,6 +193,13 @@ async function load(){
   const d = await r.json();
   PROFILES = d.profiles || [];
   document.getElementById("repo").textContent = d.repo || "";
+  VERSIONS = d.versions || [];
+  const dl = document.getElementById("known");
+  if (dl) dl.innerHTML = VERSIONS.map(v => `<option value="${esc(v)}">`).join("");
+  const vs = document.getElementById("versions");
+  if (vs) vs.textContent = VERSIONS.length
+    ? "Versions in the repository: " + VERSIONS.join(", ")
+    : "No version tags in the repository yet — tag a release and the patch option becomes available.";
   const box = document.getElementById("profiles");
   if (!PROFILES.length){ box.innerHTML = '<span class="muted">No profiles in profiles/.</span>'; return; }
   box.innerHTML = PROFILES.map((p,i) => p.valid ? `

@@ -175,6 +175,23 @@ def what_if(cores: int, ram_gb: float, ctx: int, per_auditor: int = 2) -> dict:
     return s.as_dict()
 
 
+def known_versions(repo: str) -> list:
+    """Tags in the product repository, newest first.
+
+    The page offers these rather than leaving an operator to guess. Typing
+    "v3.2" for "v3.24" produced a raw git message about ambiguous arguments and
+    separating paths from revisions, which tells whoever reads it nothing they
+    can act on.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", repo, "tag", "--sort=-creatordate"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [t.strip() for t in (r.stdout or "").splitlines() if t.strip()][:25]
+
+
 def _sizer(**kw):
     from studio.sizing import _load
     return _load().size_deployment(**kw).as_dict()
@@ -231,7 +248,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/profiles":
             self._json({"profiles": [profile_summary(p)
                                      for p in profile_paths(self.profiles_dir)],
-                        "repo": os.path.abspath(self.repo)})
+                        "repo": os.path.abspath(self.repo),
+                        "versions": known_versions(self.repo)})
             return
         if path.startswith("/api/build/"):
             job = JOBS.get(path.rsplit("/", 1)[-1])
@@ -302,7 +320,21 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 d = patch_is_legal(self.repo, base, version)
             except PackagingError as exc:
-                return {"error": "cannot compare %s..%s: %s" % (base, version, exc)}
+                # git's own wording here is about ambiguous arguments and
+                # separating paths from revisions. True, and useless to the
+                # person who simply mistyped a version.
+                tags = known_versions(self.repo)
+                missing = [v for v in (base, version) if v not in tags]
+                if missing and tags:
+                    return {"error": "There is no version %s in the repository. "
+                                     "Versions that exist: %s"
+                                     % (" or ".join(missing), ", ".join(tags))}
+                if not tags:
+                    return {"error": "The product repository has no version tags yet, "
+                                     "so there is nothing to compare against. Tag a "
+                                     "release first (git tag -a v3.25) and the patch "
+                                     "path becomes available."}
+                return {"error": "Could not compare %s with %s: %s" % (base, version, exc)}
             if p.bundle == BundleShape.PATCH and not d.legal:
                 return {"refused": True, "shape": "full", "reason": d.reason,
                         "blocking": d.blocking_changes}

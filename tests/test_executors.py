@@ -103,3 +103,57 @@ def test_an_unknown_binary_raises_a_clear_error():
 
 def test_tool_detection():
     assert not ex.tool_available("definitely-not-real-xyz")
+
+
+# -- compilation happens in the image the product ships on -------------------
+# It used to run nuitka on the build machine. On a Windows host that produced
+# a .pyd for cp314-win_amd64 -- the wrong platform and the wrong interpreter for
+# a python:3.11-slim Linux image, an artifact that could never be shipped. Built
+# there anyway it compiled 54 modules successfully and then segfaulted on
+# import. Built inside the target image the same source imports cleanly, so the
+# host was the problem, not the compiler.
+
+def test_compilation_requires_docker(monkeypatch, tmp_path):
+    """Without docker it fails, and says what turning it off would cost."""
+    monkeypatch.setattr(ex, "tool_available", lambda name: False)
+    ok, detail = ex.nuitka_compiler(str(tmp_path), str(tmp_path / "out"))()
+    assert ok is False
+    assert "inside the image" in detail, detail
+    assert "compile_source: false" in detail, detail
+
+
+def test_a_build_that_does_not_import_is_refused(monkeypatch, tmp_path):
+    """"It compiled" is not evidence it works.
+
+    The Windows attempt compiled cleanly and died in exec_module. A module that
+    fails at load is worse than shipping source: the customer's app will not
+    start at all.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "src.cpython-311-x86_64-linux-gnu.so").write_bytes(b"\x7fELF")
+    monkeypatch.setattr(ex, "tool_available", lambda name: name == "docker")
+    # docker exits 0 and produced a .so, but the import probe never printed its marker
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "compiled fine, no marker"))
+    ok, detail = ex.nuitka_compiler(str(tmp_path), str(out))()
+    assert ok is False
+    assert "does not import" in detail, detail
+
+
+def test_a_successful_build_reports_the_image(monkeypatch, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "src.cpython-311-x86_64-linux-gnu.so").write_bytes(b"\x7fELF")
+    monkeypatch.setattr(ex, "tool_available", lambda name: name == "docker")
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "...\nNUITKA_IMPORT_OK\n"))
+    ok, detail = ex.nuitka_compiler(str(tmp_path), str(out))()
+    assert ok, detail
+    assert "python:3.11-slim" in detail and "imported" in detail, detail
+
+
+def test_producing_nothing_is_a_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ex, "tool_available", lambda name: name == "docker")
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "NUITKA_IMPORT_OK"))
+    ok, detail = ex.nuitka_compiler(str(tmp_path), str(tmp_path / "empty"))()
+    assert ok is False
+    assert "no native modules" in detail, detail

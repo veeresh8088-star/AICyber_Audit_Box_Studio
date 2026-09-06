@@ -140,107 +140,43 @@ def cmd_licence(args) -> int:
 
 
 def cmd_build(args) -> int:
-    """Run the whole chain. Every gate must pass or nothing is produced."""
-    import datetime
+    """Run the whole chain. Every gate must pass or nothing is produced.
+
+    The sequence itself lives in studio.chain, shared with the web UI. Two front
+    ends each assembling their own chain would drift, and the artifact somebody
+    ships would be the one that skipped a gate.
+    """
+    from studio.chain import ChainContext, run_chain
     p = load_profile(args.profile)
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
-    report = pl.BuildReport(profile=p.licence.customer, version=args.version,
-                            started=datetime.datetime.now().isoformat(timespec="seconds"))
+    ctx = ChainContext(p, args.version, out_dir)
 
-    def add(step: pl.StepResult) -> bool:
-        report.steps.append(step)
-        if not step.ok:
-            print(report.summary())
-            print(f"\nreport: {_write_report(report, out_dir, args.version)}")
-        return step.ok
-
-    # 1 shape
-    step = pl._timed(lambda: pl.step_resolve_shape(p, args.repo, args.version, args.previous), "resolve shape")
-    if not add(step):
-        return 3
-    shape = step.data.get("shape", "full")
-    patch_from = step.data.get("from")
-
-    # 1b the verifying key, checked before anything is built rather than after
-    if not add(pl._timed(lambda: pl.step_licence_key(
-            ex.licence_key_present(args.repo)), "licence key")):
-        return 3
-
-    # 2 sizing
-    if not add(pl._timed(lambda: pl.step_sizing(p, _sizer), "sizing")):
-        return 4
-
-    # 3 tests
-    if not add(pl._timed(lambda: pl.step_tests(p, ex.pytest_runner(args.repo, args.test_path)), "tests")):
-        return 5
-
-    # 4 compile -- a missing compiler fails here rather than shipping source
-    if not add(pl._timed(lambda: pl.step_compile(
-            p, ex.nuitka_compiler(args.repo, os.path.join(out_dir, "compiled"))), "compile")):
-        return 6
-
-    # 5 dependency scan
-    if not add(pl._timed(lambda: pl.step_sca(p, ex.grype_scanner(args.scan_target or args.repo)), "sca")):
-        return 7
-
-    # 6 bundle
-    step = pl._timed(lambda: pl.step_bundle(
-        p, shape, ex.bundle_builder(args.repo, out_dir, args.version, patch_from)), "bundle")
-    if not add(step):
-        return 8
-    bundle_path = step.data["path"]
-
-    # 7 verify before anyone ships it. The expectation list is the point: an
-    # empty one only proved the tar opened, so a bundle missing the images tar
-    # -- the only part that matters -- passed and would have been published.
-    if not add(pl._timed(lambda: pl.step_verify(
-            bundle_path, ex.tar_verifier(ex.bundle_expectations(shape, args.version))),
-            "verify")):
-        return 9
-
-    # 7b the weights, which no other check can see: verify_images_tar proves the
-    # image tag is in the tar, never that /models inside it is populated.
-    if not add(pl._timed(lambda: pl.step_verify_models(
-            p, ex.image_model_verifier(f"aicyberauditbox-llm:{args.version}")),
-            "verify models")):
-        return 9
-
-    # 8 licence
-    step = pl._timed(lambda: pl.step_licence(p, _issue_for), "licence")
-    if not add(step):
-        return 10
-    licence_key = step.data["licence_key"]
-    report.licence_key = licence_key
-
-    # 9 encrypt, keyed to that licence
-    artifact = bundle_path
-    if p.build.encrypt_bundle:
-        enc_path = bundle_path + ".enc"
-        step = pl._timed(lambda: pl.step_encrypt(
-            p, bundle_path, licence_key,
-            lambda src, key: encrypt_bundle(src, enc_path, key)), "encrypt")
-        if not add(step):
-            return 11
-        artifact = enc_path
-    report.artifact = artifact
-
-    # 9b sha256 of whatever actually ships, encrypted or not
-    step = pl._timed(lambda: pl.step_checksum(p, artifact, ex.checksum_writer()), "checksum")
-    if not add(step):
-        return 11
-    report.sha256 = step.data.get("sha256")
-
-    # 10 publish
     publisher = (ex.artifactory_publisher(args.artifactory, args.artifactory_repo)
                  if args.artifactory else None)
-    if not add(pl._timed(lambda: pl.step_publish(p, artifact, args.version, publisher), "publish")):
-        return 12
+    for step in run_chain(p, ctx, repo=args.repo, version=args.version,
+                          previous=args.previous, test_path=args.test_path,
+                          scan_target=args.scan_target, issuer=_issue_for,
+                          sizer=_sizer, publisher=publisher):
+        mark = "skip" if step.skipped else ("ok" if step.ok else "FAIL")
+        print(f"   {mark:>4}  {step.name:<16} {step.detail[:70]}")
+        if not step.ok:
+            print(ctx.report.summary())
+            print(f"\nreport: {_write_report(ctx.report, out_dir, args.version)}")
+            return 3
 
-    print(report.summary())
-    print(f"\nartifact: {artifact}")
-    print(f"   licence:  {licence_key[:48]}...")
-    print(f"   report:   {_write_report(report, out_dir, args.version)}")
+    print(ctx.report.summary())
+    print(f"\nartifact: {ctx.artifact}")
+    if ctx.licence_key:
+        print(f"   licence:  {ctx.licence_key[:48]}...")
+    print(f"   report:   {_write_report(ctx.report, out_dir, args.version)}")
+    return 0
+
+
+def cmd_ui(args) -> int:
+    """Serve the local page for whoever is not going to type any of this."""
+    from studio import web
+    web.serve(port=args.port, repo=args.repo, out_dir=args.out)
     return 0
 
 
@@ -302,6 +238,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="base URL; omitted, the artifact is left locally")
     b.add_argument("--artifactory-repo", default="auditbox/releases")
     b.set_defaults(func=cmd_build)
+
+    u = sub.add_parser("ui", help="open the local page instead of typing commands")
+    u.add_argument("--port", type=int, default=8770)
+    u.add_argument("--repo", default=".", help="path to the product repository")
+    u.add_argument("--out", default="out", help="where artifacts are written")
+    u.set_defaults(func=cmd_ui)
 
     li = sub.add_parser("licence", help="issue a signed licence key for a profile")
     li.add_argument("profile")

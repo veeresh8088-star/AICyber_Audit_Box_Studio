@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuditBox Release Studio</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --line:#252a36; --text:#e6e9ef;
+    --muted:#96a0b5; --accent:#6c8cff; --ok:#2fbf71; --bad:#e5484d; --warn:#f5a524;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:12px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:700}
+  .repo{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace}
+  main{max-width:1100px;margin:0 auto;padding:22px 24px 60px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+     margin:26px 0 10px;font-weight:700}
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:14px 16px;cursor:pointer;transition:border-color .12s}
+  .card:hover{border-color:#39405480}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+  .card.bad{border-color:var(--bad)}
+  .cust{font-weight:700;font-size:15px;margin-bottom:2px}
+  .fw{display:inline-block;background:#232838;border:1px solid var(--line);
+      border-radius:999px;padding:1px 9px;font-size:11px;margin:4px 4px 0 0}
+  .kv{color:var(--muted);font-size:12px;margin-top:8px;
+      font-family:ui-monospace,Consolas,monospace;white-space:pre-wrap}
+  form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:6px}
+  label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+  input{background:#10131b;border:1px solid var(--line);color:var(--text);
+        border-radius:8px;padding:8px 10px;font-size:14px;min-width:160px;
+        font-family:ui-monospace,Consolas,monospace}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#0b0d12;border:0;border-radius:8px;
+         padding:9px 16px;font-weight:700;font-size:13px;cursor:pointer}
+  button.ghost{background:#222736;color:var(--text);border:1px solid var(--line)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .steps{margin-top:10px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .step{display:flex;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line);
+        align-items:flex-start}
+  .step:last-child{border-bottom:0}
+  .mark{width:64px;flex:none;font-weight:700;font-size:11px;letter-spacing:.06em;
+        text-transform:uppercase;padding-top:2px}
+  .mark.ok{color:var(--ok)} .mark.bad{color:var(--bad)} .mark.skip{color:var(--warn)}
+  .mark.run{color:var(--accent)}
+  .sname{width:130px;flex:none;font-weight:600}
+  .sdetail{color:var(--muted);font-family:ui-monospace,Consolas,monospace;
+           font-size:12px;word-break:break-word;flex:1}
+  .secs{color:var(--muted);font-size:11px;flex:none}
+  .note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+        border-radius:8px;padding:12px 14px;margin-top:10px;font-size:13px}
+  .note.bad{border-left-color:var(--bad)}
+  .note.ok{border-left-color:var(--ok)}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all}
+  .hide{display:none}
+  .muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>AuditBox Release Studio</h1>
+  <span class="repo" id="repo"></span>
+</header>
+
+<main>
+  <h2>Customer</h2>
+  <div class="cards" id="profiles"><span class="muted">loading…</span></div>
+
+  <div id="rest" class="hide">
+    <h2>Version</h2>
+    <form id="form" onsubmit="return false">
+      <div>
+        <label for="version">New version to build</label>
+        <input id="version" placeholder="v3.25" autocomplete="off">
+      </div>
+      <div>
+        <label for="previous">Version the customer is on</label>
+        <input id="previous" placeholder="v3.24" autocomplete="off">
+      </div>
+      <button class="ghost" id="btn-plan" onclick="doPlan()">Check first</button>
+      <button id="btn-build" onclick="doBuild()">Build</button>
+    </form>
+    <div id="plan"></div>
+
+    <div id="progress" class="hide">
+      <h2>Build</h2>
+      <div class="steps" id="steps"></div>
+      <div id="result"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+let PROFILES = [], SELECTED = null, POLL = null;
+
+function esc(s){ return String(s == null ? "" : s)
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+async function load(){
+  const r = await fetch("/api/profiles");
+  const d = await r.json();
+  PROFILES = d.profiles || [];
+  document.getElementById("repo").textContent = d.repo || "";
+  const box = document.getElementById("profiles");
+  if (!PROFILES.length){ box.innerHTML = '<span class="muted">No profiles in profiles/.</span>'; return; }
+  box.innerHTML = PROFILES.map((p,i) => p.valid ? `
+    <div class="card" data-i="${i}" onclick="pick(${i})">
+      <div class="cust">${esc(p.customer)}</div>
+      <div>${p.frameworks.map(f=>`<span class="fw">${esc(f)}</span>`).join("")}</div>
+      <div class="kv">expires ${esc(p.expires)}
+${p.cores} cores · ${p.ram_gb} GB · ${esc(p.model)}
+-np ${p.sizing.np_slots}  -c ${p.sizing.shared_pool.toLocaleString()}
+${p.sizing.max_concurrent_audits} concurrent audits (limited by ${esc(p.sizing.limited_by)})</div>
+    </div>` : `
+    <div class="card bad">
+      <div class="cust">${esc(p.file)}</div>
+      <div class="kv">will not load: ${esc(p.error)}</div>
+    </div>`).join("");
+}
+
+function pick(i){
+  SELECTED = PROFILES[i];
+  document.querySelectorAll(".card").forEach(c =>
+    c.classList.toggle("sel", c.dataset.i == String(i)));
+  document.getElementById("rest").classList.remove("hide");
+  document.getElementById("plan").innerHTML = "";
+}
+
+function payload(){
+  return { profile: SELECTED.file,
+           version: document.getElementById("version").value.trim(),
+           previous: document.getElementById("previous").value.trim() };
+}
+
+async function doPlan(){
+  if (!SELECTED) return;
+  const el = document.getElementById("plan");
+  el.innerHTML = '<div class="note muted">checking…</div>';
+  const r = await fetch("/api/plan", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload())});
+  const d = await r.json();
+  if (d.error){ el.innerHTML = `<div class="note bad">${esc(d.error)}</div>`; return; }
+  if (d.refused){
+    el.innerHTML = `<div class="note bad"><b>A patch cannot be used here.</b><br>
+      ${esc(d.reason)}<br><span class="muted">Blocking: ${esc((d.blocking||[]).join(", "))}</span><br>
+      A full bundle will be built instead.</div>`;
+    return;
+  }
+  const g = d.summary ? d.summary.gates : {};
+  el.innerHTML = `<div class="note ok"><b>Shape: ${esc(d.shape)}</b>
+    ${d.reason ? "— " + esc(d.reason) : ""}<br>
+    <span class="muted">Gates: tests ${g.tests?"on":"OFF"} · scan ${g.sca?esc(g.sca_severity):"OFF"}
+    · compile ${g.compile?"on":"OFF"} · encrypt ${g.encrypt?"on":"OFF"}
+    · model check ${g.verify_models?"on":"OFF"}</span><br>
+    <span class="muted">Nothing was built. This was a dry run.</span></div>`;
+}
+
+async function doBuild(){
+  if (!SELECTED) return;
+  document.getElementById("btn-build").disabled = true;
+  document.getElementById("btn-plan").disabled = true;
+  document.getElementById("progress").classList.remove("hide");
+  document.getElementById("steps").innerHTML =
+    '<div class="step"><span class="mark run">start</span><span class="sname">…</span>' +
+    '<span class="sdetail">starting</span></div>';
+  document.getElementById("result").innerHTML = "";
+  const r = await fetch("/api/build", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload())});
+  const d = await r.json();
+  if (d.error){ finish({error:d.error, steps:[]}); return; }
+  POLL = setInterval(() => poll(d.job), 1000);
+  poll(d.job);
+}
+
+async function poll(id){
+  const r = await fetch("/api/build/" + id);
+  const d = await r.json();
+  render(d.steps || []);
+  if (d.done){ clearInterval(POLL); finish(d); }
+}
+
+function render(steps){
+  const box = document.getElementById("steps");
+  box.innerHTML = steps.map(s => {
+    const cls = s.skipped ? "skip" : (s.ok ? "ok" : "bad");
+    const word = s.skipped ? "skipped" : (s.ok ? "ok" : "failed");
+    return `<div class="step"><span class="mark ${cls}">${word}</span>
+      <span class="sname">${esc(s.name)}</span>
+      <span class="sdetail">${esc(s.detail)}</span>
+      <span class="secs">${s.seconds ? s.seconds + "s" : ""}</span></div>`;
+  }).join("") || '<div class="step"><span class="sdetail muted">waiting…</span></div>';
+}
+
+function finish(d){
+  document.getElementById("btn-build").disabled = false;
+  document.getElementById("btn-plan").disabled = false;
+  const el = document.getElementById("result");
+  if (d.error){
+    el.innerHTML = `<div class="note bad"><b>The build stopped.</b>
+      <div class="mono">${esc(d.error)}</div></div>`;
+    return;
+  }
+  if (d.ok === false){
+    const failed = (d.steps || []).filter(s => !s.ok).pop();
+    el.innerHTML = `<div class="note bad"><b>Stopped at: ${esc(failed ? failed.name : "?")}</b><br>
+      ${esc(failed ? failed.detail : "")}<br>
+      <span class="muted">No artifact was produced, and nothing was published.</span></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="note ok"><b>Built${d.shape ? " (" + esc(d.shape) + ")" : ""}.</b>
+    <div class="mono">artifact: ${esc(d.artifact || "-")}</div>
+    ${d.sha256 ? `<div class="mono">sha256: ${esc(d.sha256)}</div>` : ""}
+    ${d.licence_key ? `<div class="mono">licence: ${esc(d.licence_key)}</div>` : ""}
+  </div>`;
+}
+
+load();
+</script>
+</body>
+</html>

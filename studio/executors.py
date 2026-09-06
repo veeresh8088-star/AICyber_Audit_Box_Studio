@@ -107,29 +107,60 @@ def grype_scanner(target: str) -> Callable:
 
 # ── compile ──────────────────────────────────────────────────────────────────
 
-def nuitka_compiler(repo: str, out_dir: str, packages: Optional[List[str]] = None) -> Callable:
-    """Compile src/ to native modules so no readable .py ships.
+def nuitka_compiler(repo: str, out_dir: str, packages: Optional[List[str]] = None,
+                    image: str = "python:3.11-slim", timeout: int = 7200) -> Callable:
+    """Compile src/ to native modules INSIDE the image the product ships on.
 
-    Returns (ok, detail). Missing Nuitka is a FAILURE, never a silent skip: a
-    compile step that does nothing while reporting success ships exactly the
-    source the customer must not have.
+    Returns (ok, detail). This used to shell out to nuitka on the build machine,
+    which was wrong in two ways at once. The product runs on python:3.11-slim,
+    so a build on a Windows host produces a .pyd for the wrong platform and the
+    wrong interpreter -- an artifact that could never go in the image. And when
+    it was tried there anyway it segfaulted on import: compiled successfully,
+    54 modules, then died in exec_module.
+
+    Built inside the target image the same source produces
+    src.cpython-311-x86_64-linux-gnu.so and imports cleanly, so the compiler was
+    never the problem; the host was.
+
+    A missing compiler is a FAILURE, never a silent skip: a compile step that
+    does nothing while reporting success ships exactly the source the customer
+    must not have.
     """
     def run():
-        if not tool_available("nuitka") and not _module_present("nuitka"):
-            return False, ("nuitka is not installed -- refusing to continue, because "
-                           "skipping compilation would ship readable .py to the customer. "
-                           "Install nuitka, or set compile_source: false to accept that.")
+        if not tool_available("docker"):
+            return False, ("docker is not installed, and compilation has to happen "
+                           "inside the image the product ships on. Install it, or set "
+                           "compile_source: false to accept readable .py in the image.")
         targets = packages or ["src"]
         os.makedirs(out_dir, exist_ok=True)
-        cmd = [sys.executable, "-m", "nuitka", "--module", "--assume-yes-for-downloads",
-               f"--output-dir={out_dir}", *targets]
-        code, out = _run(cmd, cwd=repo, timeout=7200)
+        # Build, then IMPORT what was built. "It compiled" is not evidence it
+        # works -- the Windows attempt compiled and segfaulted, and a bundle
+        # whose modules cannot be imported is worse than one shipping source.
+        script = (
+            "set -e; "
+            "apt-get update -qq >/dev/null 2>&1; "
+            "apt-get install -y -qq gcc build-essential >/dev/null 2>&1; "
+            "pip install -q nuitka; "
+            "python -m nuitka --module %s --include-package=%s "
+            "  --assume-yes-for-downloads --output-dir=/out; "
+            "cd /out && python -c 'import %s' && echo NUITKA_IMPORT_OK"
+            % (" ".join(targets), targets[0], targets[0])
+        )
+        code, out = _run(
+            ["docker", "run", "--rm",
+             "-v", "%s:/app:ro" % os.path.abspath(repo),
+             "-v", "%s:/out" % os.path.abspath(out_dir),
+             "-w", "/app", image, "sh", "-c", script],
+            timeout=timeout)
+        produced = [f for f in os.listdir(out_dir) if f.endswith((".so", ".pyd"))]
         if code != 0:
-            return False, f"nuitka failed: {out[-300:]}"
-        produced = [f for f in os.listdir(out_dir) if f.endswith((".pyd", ".so"))]
+            return False, "nuitka failed in %s: %s" % (image, out[-300:])
         if not produced:
             return False, "nuitka reported success but produced no native modules"
-        return True, f"{len(produced)} native module(s) built"
+        if "NUITKA_IMPORT_OK" not in out:
+            return False, ("%s built but does not import -- refusing to ship a module "
+                           "that fails at load. %s" % (produced[0], out[-200:]))
+        return True, "%d native module(s) built in %s and imported" % (len(produced), image)
     return run
 
 

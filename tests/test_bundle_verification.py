@@ -285,3 +285,70 @@ def test_the_database_version_is_read_from_the_product_not_guessed(tmp_path):
 
 def test_a_missing_bundler_falls_back_rather_than_crashing(tmp_path):
     assert ex.product_db_version(str(tmp_path)) == "3.10"
+
+
+# -- the bundle is looked for where it was told to be written ----------------
+# The studio never passed --out, so the bundler used its own default
+# (<parent of repo>/customer_deployment_package/v<version>) while this searched
+# the studio's out/ and then fell back to the newest .tar in the repo root. That
+# fallback would have picked up a stale tar from an earlier release, verified it,
+# signed a licence for it and published it as the new build.
+
+def test_the_bundler_is_told_where_to_write(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "build_customer_bundle.py").write_text("# stub\n")
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return 0, "built"
+
+    monkeypatch.setattr(ex, "_run", fake_run)
+    ex.bundle_builder(str(repo), str(tmp_path / "out"), "v3.25")("full")
+    assert "--out" in seen["cmd"], seen["cmd"]
+    assert "--version" in seen["cmd"]
+    # The filename form, so the bundler names things as every release has been.
+    assert "3.25" in seen["cmd"] and "v3.25" not in seen["cmd"], seen["cmd"]
+
+
+def test_a_stale_tar_elsewhere_is_never_picked_up(monkeypatch, tmp_path):
+    """The bug this guards: an old tar in the repo becoming "the new bundle"."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "build_customer_bundle.py").write_text("# stub\n")
+    (repo / "AICyberAuditBox-3.20-complete.tar").write_bytes(b"an old release")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "something-old.tar").write_bytes(b"also not this build")
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "built"))
+
+    ok, path, detail = ex.bundle_builder(str(repo), str(out), "v3.25")("full")
+    assert ok is False, "a tar from somewhere else was accepted as the build"
+    assert path is None
+    assert "no tar was found" in detail, detail
+
+
+def test_the_bundle_found_in_the_right_place_is_accepted(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "build_customer_bundle.py").write_text("# stub\n")
+    out = tmp_path / "out"
+    (out / "v3.25").mkdir(parents=True)
+    real = out / "v3.25" / "AICyberAuditBox-3.25-complete.tar"
+    real.write_bytes(b"this build")
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "built"))
+
+    ok, path, detail = ex.bundle_builder(str(repo), str(out), "v3.25")("full")
+    assert ok, detail
+    assert os.path.basename(path) == "AICyberAuditBox-3.25-complete.tar"
+
+
+def test_a_patch_base_also_uses_the_filename_form(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "build_customer_bundle.py").write_text("# stub\n")
+    seen = {}
+    monkeypatch.setattr(ex, "_run", lambda cmd, **k: (seen.update(cmd=cmd), (0, "x"))[1])
+    ex.bundle_builder(str(repo), str(tmp_path / "o"), "v3.25", patch_from="v3.24")("patch")
+    assert "3.24" in seen["cmd"] and "v3.24" not in seen["cmd"], seen["cmd"]

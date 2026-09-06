@@ -39,7 +39,7 @@ from studio.sizing import size_for_profile
 # process loaded at start. That combination shows an operator new buttons wired
 # to endpoints that answer "not found", which looks like a broken feature rather
 # than a stale server. The page checks this and says which it is.
-API_VERSION = 6
+API_VERSION = 7
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -371,6 +371,7 @@ class Handler(BaseHTTPRequestHandler):
                         "repo": os.path.abspath(self.repo),
                         "versions": known_versions(self.repo),
                         "api_version": API_VERSION,
+                        "out_dir": os.path.abspath(self.out_dir),
                         # Served, never hardcoded in the page. A hand-written
                         # copy drifted immediately: it offered NIST, PCIDSS,
                         # HIPAA and GDPR -- two of which the product has never

@@ -87,6 +87,7 @@
 <header>
   <h1>AuditBox Release Studio</h1>
   <span class="repo" id="repo"></span>
+  <span class="repo" id="outdir"></span>
 </header>
 
 <main>
@@ -182,7 +183,8 @@
 
 <script>
 let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto", VERSIONS = [];
-const PAGE_API = 6;   // must match web.API_VERSION; see the banner below
+const PAGE_API = 7;
+let OUT_DIR = "";   // must match web.API_VERSION; see the banner below
 
 const SHAPE_MEANS = {
   auto:  "Compares the two versions and picks. Only src/ and config/ changed " +
@@ -254,8 +256,11 @@ async function load(){
   const d = await r.json();
   PROFILES = d.profiles || [];
   document.getElementById("repo").textContent = d.repo || "";
+  const od = document.getElementById("outdir");
+  if (od && d.out_dir) od.textContent = "→ builds land in " + d.out_dir;
   VERSIONS = d.versions || [];
   FRAMEWORKS = d.frameworks || [];
+  OUT_DIR = d.out_dir || "";
   const stale = document.getElementById("stale");
   if ((d.api_version || 0) < PAGE_API){
     stale.classList.remove("hide");
@@ -436,6 +441,8 @@ async function doPlan(){
               `<li>${esc(i.tag)} &mdash; ${esc(i.holds)}</li>`).join("")}</ul>`
           : ""}</li>`).join("")}</ul>
       <span class="muted">Each of these is checked before publishing; a missing one stops the build.</span>
+      ${OUT_DIR ? `<div class="mono" style="margin-top:6px">written to ${esc(OUT_DIR)}\v${
+        esc(String(document.getElementById("version").value.trim()).replace(/^v/, ""))}</div>` : ""}
     </div>` : ""}</div>`;
 }
 

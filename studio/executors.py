@@ -217,9 +217,15 @@ def bundle_builder(repo: str, out_dir: str, version: str,
     """Call the product's own build_customer_bundle.py.
 
     Reused rather than reimplemented: it already produces the three shapes and
-    already verifies its own tar, reading manifest.json to confirm every image
-    tag made it in "rather than discovering it at the customer site after
-    another multi-GB transfer".
+    already verifies its own images tar against the manifest.
+
+    --out is passed explicitly. Without it the bundler used its own default,
+    <parent of the repo>/customer_deployment_package/v<version>, while this
+    looked in the studio's out/ and then fell back to the newest .tar in the
+    repository root. That fallback is the dangerous half: a stale tar left in
+    the repo would have been picked up, verified and published as the new
+    bundle. The bundler nests under v<version>, so that is where the result is
+    looked for, and nowhere else.
     """
     def run(shape: str):
         script = os.path.join(repo, "build_customer_bundle.py")
@@ -228,20 +234,26 @@ def bundle_builder(repo: str, out_dir: str, version: str,
                 f"build_customer_bundle.py is not in {repo} -- point --repo at the "
                 f"product repository, which is where that script lives."
             )
-        # The bundler names files from this, so it gets the filename form.
-        cmd = [sys.executable, script, "--version", artifact_version(version)]
+        v = artifact_version(version)
+        target = os.path.abspath(out_dir)
+        cmd = [sys.executable, script, "--version", v, "--out", target]
         if shape == "full":
             cmd.append("--full")
         elif shape == "patch":
             if not patch_from:
                 return False, None, "patch requested with no base version"
-            cmd += ["--patch", patch_from]
+            cmd += ["--patch", artifact_version(patch_from)]
         code, out = _run(cmd, cwd=repo, timeout=7200)
         if code != 0:
             return False, None, f"bundle failed: {out[-300:]}"
-        produced = _newest_tar(out_dir) or _newest_tar(repo)
+        # Exactly where the bundler was told to write, and only there.
+        produced = _newest_tar(os.path.join(target, "v" + v))
         if not produced:
-            return False, None, "bundle reported success but no tar was found"
+            return False, None, (
+                "bundle reported success but no tar was found in %s. It is not "
+                "looked for anywhere else on purpose: a stale tar picked up from "
+                "another directory would be verified and published as this build."
+                % os.path.join(target, "v" + v))
         return True, produced, f"{shape} bundle: {os.path.basename(produced)}"
     return run
 

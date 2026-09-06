@@ -520,3 +520,52 @@ def test_without_docker_it_raises_rather_than_passing(monkeypatch):
     monkeypatch.setattr(ex, "tool_available", lambda n: False)
     with pytest.raises(ex.ExecutorError):
         ex.image_contents_verifier("img", ex.APP_IMAGE_CONTENTS)()
+
+
+# -- the sizing has to reach the customer ------------------------------------
+# It was computed per profile, displayed with confidence, and then not shipped:
+# the compose carries MAX_CONCURRENT_AUDITS commented out, so every installation
+# detected its own regardless of what the profile said. A number presented as a
+# decision that decides nothing.
+
+def test_the_runtime_limits_are_passed_to_the_bundler(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "build_customer_bundle.py").write_text("# stub\n")
+    seen = {}
+    monkeypatch.setattr(ex, "_run", lambda cmd, **k: (seen.update(cmd=cmd), (0, "x"))[1])
+    ex.bundle_builder(str(repo), str(tmp_path / "o"), "v3.25",
+                      runtime_env={"MAX_CONCURRENT_AUDITS": 16,
+                                   "MAX_AUDITS_PER_AUDITOR": 2})("full")
+    cmd = seen["cmd"]
+    assert "--runtime" in cmd
+    assert "MAX_CONCURRENT_AUDITS=16" in cmd, cmd
+    assert "MAX_AUDITS_PER_AUDITOR=2" in cmd, cmd
+
+
+def test_no_runtime_limits_means_no_flags(monkeypatch, tmp_path):
+    """Absent a figure the customer's container detects its own, as before."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "build_customer_bundle.py").write_text("# stub\n")
+    seen = {}
+    monkeypatch.setattr(ex, "_run", lambda cmd, **k: (seen.update(cmd=cmd), (0, "x"))[1])
+    ex.bundle_builder(str(repo), str(tmp_path / "o"), "v3.25")("full")
+    assert "--runtime" not in seen["cmd"]
+
+
+def test_a_profile_without_a_pinned_figure_uses_the_derived_one():
+    """max_concurrent_audits is None by design: the hardware decides.
+
+    Shipping that None would write MAX_CONCURRENT_AUDITS=None into a customer's
+    compose file.
+    """
+    import yaml
+    from studio.config import Profile
+    from studio.sizing import size_for_profile
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "profiles", "stpi.yaml"), encoding="utf-8") as fh:
+        p = Profile(**yaml.safe_load(fh))
+    assert p.runtime.max_concurrent_audits is None, "profile now pins one; test is stale"
+    derived = size_for_profile(p).max_concurrent_audits
+    assert isinstance(derived, int) and derived > 0

@@ -273,7 +273,8 @@ def _module_present(name: str) -> bool:
 # ── bundle ───────────────────────────────────────────────────────────────────
 
 def bundle_builder(repo: str, out_dir: str, version: str,
-                   patch_from: Optional[str] = None) -> Callable:
+                   patch_from: Optional[str] = None,
+                   runtime_env: Optional[dict] = None) -> Callable:
     """Call the product's own build_customer_bundle.py.
 
     Reused rather than reimplemented: it already produces the three shapes and
@@ -297,6 +298,11 @@ def bundle_builder(repo: str, out_dir: str, version: str,
         v = artifact_version(version)
         target = os.path.abspath(out_dir)
         cmd = [sys.executable, script, "--version", v, "--out", target]
+        # The limits this customer was sized for, pinned into their compose.
+        # Computed per profile and previously not shipped at all, so every
+        # installation fell back to detecting its own regardless of the profile.
+        for key, value in sorted((runtime_env or {}).items()):
+            cmd += ["--runtime", "%s=%s" % (key, value)]
         if shape == "full":
             cmd.append("--full")
         elif shape == "patch":

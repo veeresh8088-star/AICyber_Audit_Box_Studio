@@ -89,8 +89,15 @@ def run_chain(profile: Profile, ctx: ChainContext, *, repo: str, version: str,
     if not step.ok:
         return
 
+    sizing = {}
+
+    def _sizing_step():
+        step = pl.step_sizing(profile, sizer)
+        sizing.update(step.data or {})
+        return step
+
     for name, make in (
-        ("sizing", lambda: pl.step_sizing(profile, sizer)),
+        ("sizing", _sizing_step),
         ("tests", lambda: pl.step_tests(profile, ex.pytest_runner(repo, test_path))),
         # A missing compiler fails here rather than quietly shipping source.
         ("compile", lambda: pl.step_compile(
@@ -102,10 +109,21 @@ def run_chain(profile: Profile, ctx: ChainContext, *, repo: str, version: str,
         if not step.ok:
             return
 
-    # 6 bundle
+    # 6 bundle. The sizing step computed this customer's limits; they are
+    # carried into the compose the bundle ships, rather than being reported and
+    # then discarded while the customer's container detects its own.
+    # The profile may pin a figure; where it does not, max_concurrent_audits is
+    # None by design and the number the sizing step derived from this customer's
+    # hardware is the answer. Shipping the literal None would write
+    # MAX_CONCURRENT_AUDITS=None into their compose.
+    runtime_env = {"MAX_AUDITS_PER_AUDITOR": profile.runtime.max_audits_per_auditor}
+    concurrent = (profile.runtime.max_concurrent_audits
+                  or sizing.get("max_concurrent_audits"))
+    if concurrent:
+        runtime_env["MAX_CONCURRENT_AUDITS"] = concurrent
     step = record(pl._timed(lambda: pl.step_bundle(
         profile, ctx.shape,
-        ex.bundle_builder(repo, out_dir, version, patch_from)), "bundle"))
+        ex.bundle_builder(repo, out_dir, version, patch_from, runtime_env)), "bundle"))
     yield step
     if not step.ok:
         return

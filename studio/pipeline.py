@@ -263,6 +263,23 @@ def step_licence_key(checker: Callable[[], tuple]) -> StepResult:
     return StepResult("licence key", ok, detail)
 
 
+def step_image_contents(profile: Profile, checker: Callable[[], tuple],
+                        name: str = "image contents") -> StepResult:
+    """Confirm the built image holds the files the running app opens.
+
+    Rides with verify_models, because it is the same class of check and the same
+    reason: docker build reports success per instruction, not per file, and an
+    image that loads and then fails on a missing template is discovered at the
+    customer site.
+    """
+    if not profile.build.verify_models:
+        return StepResult(name, True,
+                          "skipped by profile -- THE IMAGE MAY SHIP INCOMPLETE",
+                          skipped=True)
+    ok, detail = checker()
+    return StepResult(name, ok, detail)
+
+
 def step_checksum(profile: Profile, artifact: str,
                   writer: Callable[[str], tuple]) -> StepResult:
     """Write a sha256 beside the artifact for the customer to check on arrival.

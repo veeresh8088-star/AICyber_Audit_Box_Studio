@@ -467,3 +467,56 @@ def test_a_non_repository_does_not_block(tmp_path):
     """No git, no claim either way -- this gate must not invent a failure."""
     from studio.packaging import uncommitted_changes
     assert uncommitted_changes(str(tmp_path)) == []
+
+
+# -- the image has to hold what the app opens --------------------------------
+# docker build reports success per instruction, not per file: a COPY whose
+# source moved copies nothing and still exits 0. The image then loads and fails
+# somewhere late and specific -- mounting static/, exporting a report, verifying
+# a licence -- which is the worst place to discover it. Every path here was
+# found by walking what the running code actually opens.
+
+def test_the_expected_contents_cover_what_the_app_opens():
+    paths = [p for p, _, _ in ex.APP_IMAGE_CONTENTS]
+    for needed in ("/app/src/api/static/index.html",      # FastAPI mounts it at startup
+                   "/app/src/core/knowledge",             # framework reference data
+                   "/app/Sample report.docx",             # exports
+                   "/app/config/licence_public.pem",      # entitlement verification
+                   "/home/appuser/.cache/doctr"):         # OCR, on an offline machine
+        assert needed in paths, needed
+
+
+def test_every_expected_path_says_why_it_matters():
+    """A gate that names a file without saying what breaks is a puzzle."""
+    for path, what, why in ex.APP_IMAGE_CONTENTS + ex.LLM_IMAGE_CONTENTS:
+        assert path.startswith("/"), path
+        assert what and why, (path, what, why)
+
+
+def test_a_missing_file_is_reported_with_its_consequence(monkeypatch):
+    monkeypatch.setattr(ex, "tool_available", lambda n: True)
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (
+        0, "OK /app/src/api/main.py\nNO /app/config/licence_public.pem\n"))
+    ok, detail = ex.image_contents_verifier("img", [
+        ("/app/src/api/main.py", "application code", "nothing runs"),
+        ("/app/config/licence_public.pem", "the licence verifying key",
+         "an installation with enforcement on refuses every framework"),
+    ])()
+    assert ok is False
+    assert "licence verifying key" in detail
+    assert "refuses every framework" in detail, detail
+
+
+def test_a_complete_image_passes(monkeypatch):
+    monkeypatch.setattr(ex, "tool_available", lambda n: True)
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "OK /a\nOK /b\n"))
+    ok, detail = ex.image_contents_verifier("img", [
+        ("/a", "thing one", "x"), ("/b", "thing two", "y")])()
+    assert ok and "2 runtime path(s)" in detail
+
+
+def test_without_docker_it_raises_rather_than_passing(monkeypatch):
+    """Never conclude the image is complete because the check could not run."""
+    monkeypatch.setattr(ex, "tool_available", lambda n: False)
+    with pytest.raises(ex.ExecutorError):
+        ex.image_contents_verifier("img", ex.APP_IMAGE_CONTENTS)()

@@ -608,6 +608,63 @@ def image_model_verifier(llm_tag: str, expected: Optional[List[str]] = None,
     return run
 
 
+# -- is everything the app needs actually in the image? -----------------------
+
+# Checked by running the built image, not by reading the Dockerfile. Each entry
+# is (path inside the image, what it is, why its absence matters). Every one of
+# these was found by walking what the code opens at runtime; a Dockerfile COPY
+# that silently matched nothing looks identical to one that worked.
+APP_IMAGE_CONTENTS = [
+    ("/app/src/api/main.py", "application code",
+     "nothing runs"),
+    ("/app/src/api/static/index.html", "the web UI",
+     "FastAPI raises at startup mounting a directory that is not there"),
+    ("/app/src/core/knowledge", "framework knowledge files",
+     "controls are evaluated without their reference data"),
+    ("/app/Sample report.docx", "the report template",
+     "exports fail at the end of an audit, after all the work"),
+    ("/app/config/licence_public.pem", "the licence verifying key",
+     "an installation with enforcement on refuses every framework"),
+    ("/home/appuser/.cache/doctr", "the OCR model cache",
+     "OCR tries to download a model on a machine with no internet"),
+]
+
+LLM_IMAGE_CONTENTS = [
+    ("/app/llama-server", "the inference binary", "the container cannot start"),
+    ("/llm-entrypoint.sh", "the entrypoint", "nothing selects which model to serve"),
+]
+
+
+def image_contents_verifier(tag: str, expected: List[tuple]) -> Callable:
+    """Confirm the paths the running app opens are present in the image.
+
+    docker build reports success per instruction, not per file: a COPY whose
+    source moved copies nothing and still exits 0. The result loads and then
+    fails somewhere specific and late -- mounting static/, exporting a report,
+    verifying a licence -- which is the worst place to find out.
+    """
+    def run():
+        if not tool_available("docker"):
+            raise ExecutorError(
+                "docker is not installed, so the image contents cannot be checked. "
+                "Install it, or accept that a bundle can ship an image missing the "
+                "files the application opens at runtime.")
+        script = "; ".join(
+            'if [ -e "%s" ]; then echo "OK %s"; else echo "NO %s"; fi' % (path, path, path)
+            for path, _, _ in expected)
+        code, out = _run(["docker", "run", "--rm", "--user", "root",
+                          "--entrypoint", "sh", tag, "-c", script], timeout=300)
+        if code != 0:
+            return False, "could not inspect %s: %s" % (tag, out[-200:])
+        missing = [(p, what, why) for p, what, why in expected
+                   if ("NO " + p) in out]
+        if missing:
+            return False, "; ".join("%s missing (%s) -- %s" % (what, p, why)
+                                    for p, what, why in missing)
+        return True, "%d runtime path(s) present in %s" % (len(expected), tag)
+    return run
+
+
 # -- integrity of the finished artifact ---------------------------------------
 
 def checksum_writer() -> Callable:

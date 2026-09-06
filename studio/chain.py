@@ -118,6 +118,17 @@ def run_chain(profile: Profile, ctx: ChainContext, *, repo: str, version: str,
             ctx.bundle_path, ex.tar_verifier(ex.bundle_expectations(ctx.shape, version)))),
         ("verify models", lambda: pl.step_verify_models(
             profile, ex.image_model_verifier("aicyberauditbox-llm:%s" % version))),
+        # The weights are not the only thing a build can silently omit: the web
+        # UI, the report template, the knowledge files and the licence key are
+        # all COPYd in, and a COPY that matched nothing still exits 0.
+        ("app contents", lambda: pl.step_image_contents(
+            profile, ex.image_contents_verifier(
+                "aicyberauditbox-app:%s" % ex.artifact_version(version),
+                ex.APP_IMAGE_CONTENTS), "app contents")),
+        ("llm contents", lambda: pl.step_image_contents(
+            profile, ex.image_contents_verifier(
+                "aicyberauditbox-llm:%s" % ex.artifact_version(version),
+                ex.LLM_IMAGE_CONTENTS), "llm contents")),
     ):
         step = record(pl._timed(make, name))
         yield step

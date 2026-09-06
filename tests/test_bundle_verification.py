@@ -209,3 +209,34 @@ def test_junk_in_that_slot_is_refused(tmp_path):
 def test_the_step_stops_the_build(tmp_path):
     r = pl.step_licence_key(ex.licence_key_present(str(tmp_path)))
     assert not r.ok and r.name == "licence key"
+
+
+# -- a git tag is not a filename ---------------------------------------------
+# Spotted the moment the page showed what a bundle would contain: passing the
+# tag v3.25 straight through produced "INSTALL_vv3.25.md" and a directory named
+# AICyberAuditBox-v3.25, while every release this product has ever shipped is
+# named AICyberAuditBox-3.23. The tag keeps its prefix for git; anything that
+# becomes a name loses it.
+
+@pytest.mark.parametrize("given,expected", [
+    ("v3.25", "3.25"),
+    ("3.25", "3.25"),
+    ("v3.24.1", "3.24.1"),
+    ("vnext", "vnext"),        # not a version; left alone rather than mangled
+    ("", ""),
+])
+def test_the_filename_form_of_a_version(given, expected):
+    assert ex.artifact_version(given) == expected
+
+
+def test_expectations_use_the_filename_form():
+    names = ex.bundle_expectations("full", "v3.25")
+    assert "aicyberauditbox-images-3.25.tar" in names
+    assert "INSTALL_v3.25.md" in names
+    assert not any("vv3.25" in n for n in names), names
+    assert not any("-v3.25" in n for n in names), names
+
+
+def test_a_tagged_and_untagged_version_expect_the_same_files():
+    assert ex.bundle_expectations("full", "v3.25") == ex.bundle_expectations("full", "3.25")
+    assert ex.bundle_expectations("patch", "v3.25") == ex.bundle_expectations("patch", "3.25")

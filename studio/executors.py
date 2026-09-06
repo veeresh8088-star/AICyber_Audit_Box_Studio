@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,8 +25,16 @@ class ExecutorError(Exception):
     pass
 
 
-def _run(cmd: List[str], cwd: Optional[str] = None, timeout: int = 3600) -> Tuple[int, str]:
-    """Run a command, returning (exit code, combined output tail)."""
+def _run(cmd: List[str], cwd: Optional[str] = None, timeout: int = 3600,
+         tail: int = 4000) -> Tuple[int, str]:
+    """Run a command, returning (exit code, combined output tail).
+
+    tail is how much of the end to keep. 4000 characters is plenty for reading
+    an error, and was not enough to find pytest's summary: the product prints
+    database replication notices after the tests finish, and they pushed
+    "258 passed, 6 skipped" out of the window entirely. Callers that parse the
+    output rather than merely quote it ask for more.
+    """
     try:
         proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
@@ -33,7 +42,7 @@ def _run(cmd: List[str], cwd: Optional[str] = None, timeout: int = 3600) -> Tupl
     except subprocess.TimeoutExpired:
         raise ExecutorError(f"{cmd[0]} timed out after {timeout}s")
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    return proc.returncode, out[-4000:]
+    return proc.returncode, out[-tail:]
 
 
 def tool_available(name: str) -> bool:
@@ -42,22 +51,47 @@ def tool_available(name: str) -> bool:
 
 # ── tests ────────────────────────────────────────────────────────────────────
 
+# "258 passed, 6 skipped in 14.81s" -- a count, spaces, then the word. Written
+# without escapes so it survives being edited through a shell.
+_PYTEST_COUNT_RE = re.compile("([0-9]+) +(passed|failed|error|errors)")
+
+
 def pytest_runner(repo: str, paths: Optional[List[str]] = None) -> Callable:
-    """Run the product's test suite. Returns (passed, failed, detail)."""
+    """Run the product's test suite. Returns (passed, failed, detail).
+
+    The summary line is matched rather than split on whitespace. Splitting
+    produced the token "passed," -- with the comma pytest adds whenever anything
+    else is reported -- which never equalled "passed", so a green run of 258
+    tests was reported as "0 passed". That reads exactly like a run which
+    collected nothing, and noticing that is the one thing this step is for.
+    """
     def run():
-        cmd = [sys.executable, "-m", "pytest", "-q", *(paths or ["tests"])]
-        code, out = _run(cmd, cwd=repo, timeout=1800)
+        # No -q here. The product's pytest.ini already sets "addopts = -q", and a
+        # second one makes -qq, which drops the summary line entirely -- so the
+        # count this step exists to read was never printed. Verified against the
+        # real suite: with -q the output ends at the progress dots; without it,
+        # "258 passed, 6 skipped in 12.27s". Verbosity is the project's choice.
+        cmd = [sys.executable, "-m", "pytest", *(paths or ["tests"])]
+        # A generous tail: the summary is what this step reads, and anything the
+        # suite prints after it competes for the same window.
+        code, out = _run(cmd, cwd=repo, timeout=1800, tail=60000)
         passed = failed = 0
+        summary = ""
         for line in reversed(out.splitlines()):
-            if " passed" in line or " failed" in line:
-                for part in line.replace(",", " ").split():
-                    idx = line.split().index(part) if part in line.split() else -1
-                tokens = line.split()
-                for i, t in enumerate(tokens):
-                    if t == "passed" and i: passed = int(tokens[i-1].strip("=") or 0)
-                    if t == "failed" and i: failed = int(tokens[i-1].strip("=") or 0)
-                break
-        last = out.splitlines()[-1] if out else f"exit {code}"
+            counts = _PYTEST_COUNT_RE.findall(line)
+            if not counts:
+                continue
+            for n, word in counts:
+                if word == "passed":
+                    passed = int(n)
+                else:                     # failed, error and errors all stop the build
+                    failed += int(n)
+            summary = line.strip()
+            break
+        # The summary line, not the last line. This product prints database
+        # replication notices after its tests, so the build report was quoting
+        # "[REPLICATION SUCCESS] Synced Master -> Slave 1" as its test result.
+        last = summary or (out.splitlines()[-1] if out else "exit %d" % code)
         if code != 0 and failed == 0:
             # A run that collected nothing must not pass: a gate that goes green
             # because no test executed is worse than no gate. Distinguished from
@@ -66,12 +100,16 @@ def pytest_runner(repo: str, paths: Optional[List[str]] = None) -> Callable:
                 return 0, 1, ("pytest collected no tests -- check the path. The "
                               "product's tests/ mixes pytest files with scripts "
                               "that sys.exit at import, which pytest cannot collect")
-            failed = 1                      # non-zero exit with no parseable count
+            failed = 1                    # non-zero exit with no parseable count
+        if code == 0 and passed == 0:
+            # Exited green and counted nothing: the summary was not understood,
+            # which is how "0 passed" came to be reported as a pass.
+            return 0, 1, ("pytest exited 0 but no test count could be read from its "
+                          "output -- refusing to call that a pass. Last line: %s"
+                          % last[:120])
         return passed, failed, last
     return run
 
-
-# ── dependency scan ──────────────────────────────────────────────────────────
 
 def grype_scanner(target: str) -> Callable:
     """Scan an image or directory with Grype. Returns a list of findings.
@@ -190,7 +228,8 @@ def bundle_builder(repo: str, out_dir: str, version: str,
                 f"build_customer_bundle.py is not in {repo} -- point --repo at the "
                 f"product repository, which is where that script lives."
             )
-        cmd = [sys.executable, script, "--version", version]
+        # The bundler names files from this, so it gets the filename form.
+        cmd = [sys.executable, script, "--version", artifact_version(version)]
         if shape == "full":
             cmd.append("--full")
         elif shape == "patch":
@@ -306,6 +345,19 @@ def licence_key_present(repo: str,
     return run
 
 
+def artifact_version(version: str) -> str:
+    """The version as it appears in a FILENAME, which is not how git spells it.
+
+    Tags are v3.24; the artifacts this product has always produced are
+    AICyberAuditBox-3.23-complete.tar and INSTALL_v3.23.md. Feeding the tag
+    straight through produced "INSTALL_vv3.25.md" and a bundle directory that
+    did not match the convention every previous release used. The tag keeps its
+    prefix for git; anything that becomes a name loses it.
+    """
+    v = str(version).strip()
+    return v[1:] if v[:1].lower() == "v" and v[1:2].isdigit() else v
+
+
 def bundle_expectations(shape: str, version: str) -> List[str]:
     """The entries that must be inside the bundle tar, by shape.
 
@@ -317,6 +369,7 @@ def bundle_expectations(shape: str, version: str) -> List[str]:
     Names are matched as substrings, so the version-stamped prefix directory
     does not have to be reproduced exactly here.
     """
+    version = artifact_version(version)
     if shape == "patch":
         return [
             f"AICyberAuditBox-{version}-patch",

@@ -125,6 +125,56 @@ def profile_summary(path: str) -> dict:
     }
 
 
+# ── hardware, edited in place ────────────────────────────────────────────────
+
+_HW_FIELDS = ("physical_cores", "ram_gb", "ctx_per_request")
+
+
+def set_hardware(path: str, values: dict) -> dict:
+    """Rewrite only the hardware numbers, leaving the rest of the file alone.
+
+    A yaml.safe_load/safe_dump round trip would reformat the profile and drop
+    every comment in it -- including the ones recording why this customer is
+    licensed for what they are. Those comments are the reason the profiles are
+    version-controlled, so the lines are edited where they sit.
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+    changed, in_hw = {}, False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("hardware:"):
+            in_hw = True
+            continue
+        if in_hw and stripped and not line[:1].isspace():
+            in_hw = False                      # a new top-level key ended the block
+        if not in_hw:
+            continue
+        for field in _HW_FIELDS:
+            if field in values and stripped.startswith(field + ":"):
+                indent = line[:len(line) - len(line.lstrip())]
+                comment = ""
+                if "#" in line:
+                    # Keep the text exactly, only normalising the gap before it.
+                    comment = "  # " + line.split("#", 1)[1].strip()
+                lines[i] = "%s%s: %s%s\n" % (indent, field, values[field], comment.rstrip())
+                changed[field] = values[field]
+    if not changed:
+        return {"error": "no hardware block found in the profile"}
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.writelines(lines)
+    return {"changed": changed}
+
+
+def what_if(cores: int, ram_gb: float, ctx: int, per_auditor: int = 2) -> dict:
+    """Size a machine without touching any profile -- the calculator."""
+    from studio.sizing import _load
+    s = _load().size_deployment(
+        physical_cores=int(cores), total_ram_gb=float(ram_gb), model_gb=None,
+        ctx_per_request=int(ctx), max_audits_per_auditor=int(per_auditor))
+    return s.as_dict()
+
+
 def _sizer(**kw):
     from studio.sizing import _load
     return _load().size_deployment(**kw).as_dict()
@@ -199,6 +249,27 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/build":
             self._json(self._build(body))
             return
+        if path == "/api/size":
+            try:
+                self._json({"sizing": what_if(
+                    body.get("cores", 8), body.get("ram_gb", 32),
+                    body.get("ctx", 32768), body.get("per_auditor", 2))})
+            except Exception as exc:
+                self._json({"error": str(exc)[:200]})
+            return
+        if path == "/api/hardware":
+            target = os.path.join(self.profiles_dir,
+                                  os.path.basename(body.get("profile", "")))
+            if not os.path.isfile(target):
+                self._json({"error": "no such profile"}, 404)
+                return
+            values = {k: body[k] for k in _HW_FIELDS if k in body}
+            res = set_hardware(target, values)
+            # Re-read it, so what comes back is what the file now says rather
+            # than what was asked for.
+            res["summary"] = profile_summary(target)
+            self._json(res)
+            return
         self._json({"error": "not found"}, 404)
 
     # -- actions --
@@ -216,6 +287,15 @@ class Handler(BaseHTTPRequestHandler):
         if not version:
             return {"error": "a version is required"}
 
+        # An explicit choice from the page overrides the profile's default. Auto
+        # still decides, and a patch it judges illegal is still refused: the
+        # operator can ask for a patch, not overrule the reason one cannot work.
+        chosen = (body.get("shape") or "").strip().lower()
+        if chosen in ("patch", "full", "auto"):
+            try:
+                p = p.model_copy(update={"bundle": BundleShape(chosen)})
+            except ValueError:
+                pass
         shape, reason = p.bundle.value, ""
         base = p.patch_from or previous
         if p.bundle in (BundleShape.AUTO, BundleShape.PATCH) and base:
@@ -229,7 +309,11 @@ class Handler(BaseHTTPRequestHandler):
             shape, reason = d.shape, d.reason
         elif not base:
             reason = "no previous version given"
+        if p.bundle == BundleShape.PATCH and not base:
+            return {"error": "a patch needs the version the customer is on"}
+        from studio.executors import bundle_expectations
         return {"shape": shape, "reason": reason,
+                "contents": bundle_expectations(shape, version),
                 "summary": profile_summary(path)}
 
     def _build(self, body: dict) -> dict:
@@ -244,6 +328,14 @@ class Handler(BaseHTTPRequestHandler):
             profile = load_profile(path)
         except (ValidationError, yaml.YAMLError) as exc:
             return {"error": str(exc)[:400]}
+        chosen = (body.get("shape") or "").strip().lower()
+        if chosen in ("patch", "full", "auto"):
+            try:
+                profile = profile.model_copy(update={"bundle": BundleShape(chosen)})
+            except ValueError:
+                pass
+        if profile.bundle == BundleShape.PATCH and not (profile.patch_from or previous):
+            return {"error": "a patch needs the version the customer is on"}
 
         job = Job(uuid.uuid4().hex[:12])
         JOBS[job.id] = job

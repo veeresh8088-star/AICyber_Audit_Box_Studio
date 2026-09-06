@@ -59,6 +59,20 @@
   .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all}
   .hide{display:none}
   .muted{color:var(--muted)}
+  .row{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end}
+  .shape{display:flex;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .shape button{background:#1b1f2b;color:var(--muted);border:0;border-right:1px solid var(--line);
+                border-radius:0;padding:9px 18px;font-weight:600}
+  .shape button:last-child{border-right:0}
+  .shape button.on{background:var(--accent);color:#0b0d12;font-weight:700}
+  .hw{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+      padding:14px 16px;margin-top:10px}
+  .hw input{min-width:110px}
+  .out{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:var(--text);
+       background:#10131b;border:1px solid var(--line);border-radius:8px;
+       padding:10px 12px;margin-top:10px;white-space:pre-wrap}
+  ul.files{margin:6px 0 0;padding-left:18px;font-family:ui-monospace,Consolas,monospace;
+           font-size:12px;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -72,7 +86,31 @@
   <div class="cards" id="profiles"><span class="muted">loading…</span></div>
 
   <div id="rest" class="hide">
+    <h2>Machine this customer runs on</h2>
+    <div class="hw">
+      <div class="row">
+        <div><label for="hw-cores">Physical cores</label>
+             <input id="hw-cores" type="number" min="1" oninput="resize()"></div>
+        <div><label for="hw-ram">RAM (GB)</label>
+             <input id="hw-ram" type="number" min="1" step="0.5" oninput="resize()"></div>
+        <div><label for="hw-ctx">Context per request</label>
+             <input id="hw-ctx" type="number" step="1024" oninput="resize()"></div>
+        <button class="ghost" onclick="saveHw()">Save to profile</button>
+      </div>
+      <div class="out" id="hw-out">—</div>
+    </div>
+
     <h2>Version</h2>
+    <div class="row" style="margin-bottom:10px">
+      <div>
+        <label>Bundle</label>
+        <div class="shape" id="shape">
+          <button class="on" data-s="auto" onclick="setShape('auto')">Decide for me</button>
+          <button data-s="patch" onclick="setShape('patch')">Patch only</button>
+          <button data-s="full" onclick="setShape('full')">Full bundle</button>
+        </div>
+      </div>
+    </div>
     <form id="form" onsubmit="return false">
       <div>
         <label for="version">New version to build</label>
@@ -96,7 +134,54 @@
 </main>
 
 <script>
-let PROFILES = [], SELECTED = null, POLL = null;
+let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto";
+
+function setShape(s){
+  SHAPE = s;
+  document.querySelectorAll("#shape button").forEach(b =>
+    b.classList.toggle("on", b.dataset.s === s));
+  document.getElementById("plan").innerHTML = "";
+}
+
+async function resize(){
+  const c = +document.getElementById("hw-cores").value,
+        r = +document.getElementById("hw-ram").value,
+        x = +document.getElementById("hw-ctx").value;
+  const out = document.getElementById("hw-out");
+  if (!c || !r || !x){ out.textContent = "—"; return; }
+  const res = await fetch("/api/size", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({cores:c, ram_gb:r, ctx:x})});
+  const d = await res.json();
+  if (d.error){ out.textContent = d.error; return; }
+  const s = d.sizing;
+  out.textContent =
+    "-np " + s.np_slots + "   -c " + s.shared_pool.toLocaleString() +
+    "   (" + s.ctx_per_request.toLocaleString() + " per request\n" +
+    s.max_concurrent_audits + " concurrent audits\n" +
+    "model " + s.model_gb + "GB + KV " + (s.np_slots * s.kv_gb_per_slot).toFixed(1) +
+    "GB = " + s.projected_llm_gb + "GB of " + s.total_ram_gb +
+    "GB  (headroom " + s.headroom_gb + "GB, limited by " + s.limited_by + ")";
+}
+
+async function saveHw(){
+  if (!SELECTED) return;
+  const body = { profile: SELECTED.file,
+    physical_cores: +document.getElementById("hw-cores").value,
+    ram_gb: +document.getElementById("hw-ram").value,
+    ctx_per_request: +document.getElementById("hw-ctx").value };
+  const r = await fetch("/api/hardware", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  const d = await r.json();
+  const out = document.getElementById("hw-out");
+  if (d.error){ out.textContent = "not saved: " + d.error; return; }
+  if (d.summary && d.summary.valid){
+    const i = PROFILES.findIndex(p => p.file === SELECTED.file);
+    if (i >= 0){ PROFILES[i] = d.summary; SELECTED = d.summary; }
+  }
+  out.textContent = "saved to " + SELECTED.file + " — " + Object.keys(d.changed).join(", ");
+  setTimeout(resize, 600);
+}
 
 function esc(s){ return String(s == null ? "" : s)
   .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -129,12 +214,17 @@ function pick(i){
     c.classList.toggle("sel", c.dataset.i == String(i)));
   document.getElementById("rest").classList.remove("hide");
   document.getElementById("plan").innerHTML = "";
+  document.getElementById("hw-cores").value = SELECTED.cores;
+  document.getElementById("hw-ram").value = SELECTED.ram_gb;
+  document.getElementById("hw-ctx").value = SELECTED.sizing.ctx_per_request;
+  resize();
 }
 
 function payload(){
   return { profile: SELECTED.file,
            version: document.getElementById("version").value.trim(),
-           previous: document.getElementById("previous").value.trim() };
+           previous: document.getElementById("previous").value.trim(),
+           shape: SHAPE };
 }
 
 async function doPlan(){
@@ -157,7 +247,11 @@ async function doPlan(){
     <span class="muted">Gates: tests ${g.tests?"on":"OFF"} · scan ${g.sca?esc(g.sca_severity):"OFF"}
     · compile ${g.compile?"on":"OFF"} · encrypt ${g.encrypt?"on":"OFF"}
     · model check ${g.verify_models?"on":"OFF"}</span><br>
-    <span class="muted">Nothing was built. This was a dry run.</span></div>`;
+    <span class="muted">Nothing was built. This was a dry run.</span>
+    ${(d.contents||[]).length ? `<div style="margin-top:8px"><b>The bundle will contain:</b>
+      <ul class="files">${d.contents.map(f=>`<li>${esc(f)}</li>`).join("")}</ul>
+      <span class="muted">Each of these is checked before publishing; a missing one stops the build.</span>
+    </div>` : ""}</div>`;
 }
 
 async function doBuild(){

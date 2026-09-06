@@ -99,3 +99,44 @@ def test_the_server_binds_to_loopback_only():
     assert len(bind) == 1, bind
     assert '"127.0.0.1"' in bind[0], bind[0]
     assert "0.0.0.0" not in bind[0], bind[0]
+
+
+# -- the machine the customer actually has -----------------------------------
+
+def test_sizing_follows_the_hardware_it_is_given():
+    """Different customers, different boxes. The numbers have to move with them."""
+    small = web.what_if(4, 16, 32768)
+    big = web.what_if(64, 256, 32768)
+    assert small["np_slots"] < big["np_slots"]
+    assert small["max_concurrent_audits"] <= big["max_concurrent_audits"]
+    # A small box is held back by memory, a wide one by cores.
+    assert small["limited_by"] == "ram", small
+    assert big["limited_by"] == "cores", big
+
+
+def test_hardware_is_edited_without_losing_the_rest_of_the_file(tmp_path):
+    """A yaml round trip would drop the comments the profiles exist to carry."""
+    p = tmp_path / "cust.yaml"
+    p.write_text(
+        "# Why this customer is licensed for what they are.\n"
+        "licence:\n  customer: ACME\n"
+        "hardware:\n"
+        "  physical_cores: 8       # their box\n"
+        "  ram_gb: 32\n"
+        "  ctx_per_request: 32768\n"
+        "model: gemma-4-12B-it-Q8_0.gguf\n")
+    res = web.set_hardware(str(p), {"physical_cores": 32, "ram_gb": 125})
+    body = p.read_text()
+    assert res["changed"] == {"physical_cores": 32, "ram_gb": 125}
+    assert "physical_cores: 32" in body
+    assert "ram_gb: 125" in body
+    assert "# Why this customer is licensed" in body, "the comment was lost"
+    assert "# their box" in body, "the inline comment was lost"
+    assert "model: gemma-4-12B-it-Q8_0.gguf" in body, "an unrelated key was lost"
+    assert "ctx_per_request: 32768" in body, "an untouched field changed"
+
+
+def test_editing_a_profile_with_no_hardware_block_says_so(tmp_path):
+    p = tmp_path / "x.yaml"
+    p.write_text("licence:\n  customer: ACME\n")
+    assert "error" in web.set_hardware(str(p), {"physical_cores": 8})

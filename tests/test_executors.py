@@ -157,3 +157,55 @@ def test_producing_nothing_is_a_failure(monkeypatch, tmp_path):
     ok, detail = ex.nuitka_compiler(str(tmp_path), str(tmp_path / "empty"))()
     assert ok is False
     assert "no native modules" in detail, detail
+
+
+# -- reading pytest's summary ------------------------------------------------
+# Found by running a build through the UI: the tests gate reported "0 passed"
+# for a suite of 258. The old parser split the line on whitespace and compared
+# tokens to "passed", but pytest writes "passed," with a comma whenever it also
+# reports skips, so the comparison never matched. Failures were still caught,
+# via the non-zero exit code -- but "0 passed" is exactly how a run that
+# collected nothing looks, which is the one thing this step exists to notice.
+
+@pytest.mark.parametrize("line,passed,failed", [
+    ("258 passed, 6 skipped in 14.81s", 258, 0),
+    ("123 passed in 4.9s", 123, 0),
+    ("3 failed, 255 passed in 15s", 255, 3),
+    ("1 failed, 2 errors, 5 passed in 2s", 5, 3),
+    ("6 skipped in 0.4s", 0, 0),
+])
+def test_the_summary_line_is_read_correctly(line, passed, failed):
+    counts = ex._PYTEST_COUNT_RE.findall(line)
+    got_p = sum(int(n) for n, w in counts if w == "passed")
+    got_f = sum(int(n) for n, w in counts if w != "passed")
+    assert (got_p, got_f) == (passed, failed), counts
+
+
+def test_a_green_run_reports_its_real_count(monkeypatch, tmp_path):
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "...\n258 passed, 6 skipped in 14.8s"))
+    passed, failed, _ = ex.pytest_runner(str(tmp_path))()
+    assert (passed, failed) == (258, 0)
+
+
+def test_failures_are_counted_not_just_inferred(monkeypatch, tmp_path):
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (1, "...\n3 failed, 255 passed in 15s"))
+    passed, failed, _ = ex.pytest_runner(str(tmp_path))()
+    assert failed == 3 and passed == 255
+
+
+def test_a_green_exit_with_no_readable_count_is_not_a_pass(monkeypatch, tmp_path):
+    """Exiting 0 and counting nothing means the summary was not understood.
+
+    Treating that as success is how "0 passed" slipped through as a green gate.
+    """
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (0, "something unexpected"))
+    passed, failed, detail = ex.pytest_runner(str(tmp_path))()
+    assert failed == 1
+    assert "no test count" in detail, detail
+
+
+def test_collecting_nothing_still_fails_distinguishably(monkeypatch, tmp_path):
+    monkeypatch.setattr(ex, "_run", lambda *a, **k: (5, "no tests ran in 0.10s"))
+    passed, failed, detail = ex.pytest_runner(str(tmp_path))()
+    assert failed == 1
+    assert "collected no tests" in detail, detail

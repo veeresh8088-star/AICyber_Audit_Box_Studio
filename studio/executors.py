@@ -245,6 +245,36 @@ def artifactory_publisher(base_url: str, repo_path: str,
 
 # -- what a bundle must contain -----------------------------------------------
 
+def licence_key_present(repo: str,
+                        path: str = "config/licence_public.pem") -> Callable:
+    """The verifying key has to be in the repo, or the bundle is unusable.
+
+    Found by inspecting a real build: the file did not exist, was not tracked,
+    and was absent from the app image -- .gitignore carried a blanket *.pem that
+    kept it out. An installation with AUDITBOX_ENFORCE_ENTITLEMENTS=1 then finds
+    no verifying key, fails closed, and refuses every framework. The customer
+    gets a product that starts and audits nothing.
+
+    Failing closed is the right behaviour for the runtime; noticing before the
+    bundle ships is this step's job.
+    """
+    def run():
+        full = os.path.join(repo, path)
+        if not os.path.isfile(full):
+            return False, (f"{path} is missing from {repo}. It ships with the product "
+                           f"and verifies licences (it cannot mint them). Without it an "
+                           f"installation with entitlement enforcement on refuses every "
+                           f"framework. Generate one with 'studio keygen'.")
+        body = open(full, "rb").read()
+        if b"PUBLIC KEY" not in body:
+            return False, f"{path} is not a public key -- refusing to ship it"
+        if b"PRIVATE KEY" in body:
+            # Shipping the signing key would let any customer mint their own licence.
+            return False, f"{path} contains a PRIVATE key. This must never ship."
+        return True, f"{path} present ({len(body)} bytes), public half only"
+    return run
+
+
 def bundle_expectations(shape: str, version: str) -> List[str]:
     """The entries that must be inside the bundle tar, by shape.
 

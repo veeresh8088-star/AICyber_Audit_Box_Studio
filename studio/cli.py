@@ -162,6 +162,11 @@ def cmd_build(args) -> int:
     shape = step.data.get("shape", "full")
     patch_from = step.data.get("from")
 
+    # 1b the verifying key, checked before anything is built rather than after
+    if not add(pl._timed(lambda: pl.step_licence_key(
+            ex.licence_key_present(args.repo)), "licence key")):
+        return 3
+
     # 2 sizing
     if not add(pl._timed(lambda: pl.step_sizing(p, _sizer), "sizing")):
         return 4

@@ -162,3 +162,50 @@ def test_the_report_carries_the_digest(tmp_path):
     art.write_bytes(b"payload")
     r = pl.step_checksum(make_profile(), str(art), ex.checksum_writer())
     assert r.ok and len(r.data["sha256"]) == 64
+
+
+# -- the verifying key must be in the repo before anything is built ----------
+# Found on a real inspection: config/licence_public.pem did not exist, was not
+# tracked, and was absent from the built app image, because .gitignore carried a
+# blanket *.pem. An installation with AUDITBOX_ENFORCE_ENTITLEMENTS=1 then finds
+# no key, fails closed, and refuses every framework -- the customer gets a
+# product that starts and audits nothing. Failing closed is right at runtime;
+# catching it before the bundle ships is this gate's job.
+
+def _repo_with_key(tmp_path, body):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "licence_public.pem").write_text(body)
+    return str(tmp_path)
+
+
+def test_a_repo_without_the_verifying_key_is_refused(tmp_path):
+    ok, detail = ex.licence_key_present(str(tmp_path))()
+    assert not ok
+    assert "studio keygen" in detail, detail
+
+
+def test_a_real_public_key_passes(tmp_path):
+    repo = _repo_with_key(tmp_path,
+        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA\n-----END PUBLIC KEY-----\n")
+    ok, detail = ex.licence_key_present(repo)()
+    assert ok, detail
+    assert "public half only" in detail
+
+
+def test_a_private_key_in_that_slot_is_refused(tmp_path):
+    """Shipping the signing key would let any customer mint their own licence."""
+    repo = _repo_with_key(tmp_path,
+        "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA\n-----END PRIVATE KEY-----\n")
+    ok, detail = ex.licence_key_present(repo)()
+    assert not ok
+    assert "not a public key" in detail or "PRIVATE" in detail, detail
+
+
+def test_junk_in_that_slot_is_refused(tmp_path):
+    ok, _ = ex.licence_key_present(_repo_with_key(tmp_path, "not a key at all"))()
+    assert not ok
+
+
+def test_the_step_stops_the_build(tmp_path):
+    r = pl.step_licence_key(ex.licence_key_present(str(tmp_path)))
+    assert not r.ok and r.name == "licence key"

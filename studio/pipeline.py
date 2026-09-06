@@ -233,6 +233,17 @@ def step_verify_models(profile: Profile, verifier: Callable[[], tuple]) -> StepR
     return StepResult("verify models", ok, detail)
 
 
+def step_licence_key(checker: Callable[[], tuple]) -> StepResult:
+    """Confirm the verifying key is in the repo before anything is built.
+
+    Not optional and not profile-gated: a bundle without it is unusable at any
+    setting, because the runtime cannot tell a real licence from a forged one
+    and so trusts neither.
+    """
+    ok, detail = checker()
+    return StepResult("licence key", ok, detail)
+
+
 def step_checksum(profile: Profile, artifact: str,
                   writer: Callable[[str], tuple]) -> StepResult:
     """Write a sha256 beside the artifact for the customer to check on arrival.

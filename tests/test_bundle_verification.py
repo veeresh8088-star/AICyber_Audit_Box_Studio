@@ -240,3 +240,48 @@ def test_expectations_use_the_filename_form():
 def test_a_tagged_and_untagged_version_expect_the_same_files():
     assert ex.bundle_expectations("full", "v3.25") == ex.bundle_expectations("full", "3.25")
     assert ex.bundle_expectations("patch", "v3.25") == ex.bundle_expectations("patch", "3.25")
+
+
+# -- what is inside the one big line -----------------------------------------
+# The contents list showed aicyberauditbox-images-<v>.tar as a single entry.
+# True, and it hides everything an operator wants to confirm is going: asked
+# where the LLM, the database and the Python libraries were, the honest answer
+# was "inside that one file". docker save writes five images into it.
+
+def test_the_images_tar_is_broken_out():
+    imgs = ex.bundle_images("v3.25", "3.10")
+    tags = [i["tag"] for i in imgs]
+    assert "aicyberauditbox-app:3.25" in tags
+    assert "aicyberauditbox-llm:3.25" in tags
+    assert "aicyberauditbox-llm-embed:3.25" in tags
+    assert "aicyberauditbox-shakthidb:3.10" in tags
+    assert "redis:7-alpine" in tags
+    assert len(imgs) == 5
+
+
+def test_each_image_says_what_it_holds():
+    """The point is answering "where are the models", not listing tags."""
+    for i in ex.bundle_images("3.25"):
+        assert i["holds"], i
+    joined = " ".join(i["holds"] for i in ex.bundle_images("3.25"))
+    for thing in ("Python librar", "model weights", "PostgreSQL", "embedding"):
+        assert thing in joined, thing
+
+
+def test_the_images_use_the_filename_form_of_the_version():
+    assert ex.bundle_images("v3.25")[0]["tag"] == "aicyberauditbox-app:3.25"
+
+
+def test_the_database_version_is_read_from_the_product_not_guessed(tmp_path):
+    """The db image is the one tag that does not follow the product version.
+
+    Guessing produced shakthidb:1.0 for an image that is actually 3.10 -- a name
+    the verification step would then look for and never find.
+    """
+    (tmp_path / "build_customer_bundle.py").write_text(
+        'DB_VER = "9.9"\nDB_TAG = "aicyberauditbox-shakthidb:" + DB_VER\n')
+    assert ex.product_db_version(str(tmp_path)) == "9.9"
+
+
+def test_a_missing_bundler_falls_back_rather_than_crashing(tmp_path):
+    assert ex.product_db_version(str(tmp_path)) == "3.10"

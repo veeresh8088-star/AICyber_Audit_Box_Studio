@@ -39,7 +39,7 @@ from studio.sizing import size_for_profile
 # process loaded at start. That combination shows an operator new buttons wired
 # to endpoints that answer "not found", which looks like a broken feature rather
 # than a stale server. The page checks this and says which it is.
-API_VERSION = 5
+API_VERSION = 6
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -529,10 +529,16 @@ class Handler(BaseHTTPRequestHandler):
             reason = "no previous version given"
         if p.bundle == BundleShape.PATCH and not base:
             return {"error": "a patch needs the version the customer is on"}
-        from studio.executors import bundle_expectations
-        return {"shape": shape, "reason": reason,
-                "contents": bundle_expectations(shape, version),
-                "summary": profile_summary(path)}
+        from studio.executors import (bundle_expectations, bundle_images,
+                                      product_db_version)
+        out = {"shape": shape, "reason": reason,
+               "contents": bundle_expectations(shape, version),
+               "summary": profile_summary(path)}
+        if shape != "patch":
+            # One line of that list is a docker save of five images and holds
+            # everything -- the libraries, the model weights, the database.
+            out["images"] = bundle_images(version, product_db_version(self.repo))
+        return out
 
     def _build(self, body: dict) -> dict:
         path = os.path.join(self.profiles_dir, os.path.basename(body.get("profile", "")))

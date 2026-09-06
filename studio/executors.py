@@ -388,6 +388,49 @@ def bundle_expectations(shape: str, version: str) -> List[str]:
     ]
 
 
+def product_db_version(repo: str, default: str = "3.10") -> str:
+    """DB_VER as build_customer_bundle.py defines it.
+
+    Read rather than assumed: the database image is the one tag that does not
+    follow the product version, and guessing it produced
+    aicyberauditbox-shakthidb:1.0 for an image that is actually 3.10 -- a name
+    the verification step would then have looked for and not found.
+    """
+    path = os.path.join(repo, "build_customer_bundle.py")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("DB_VER"):
+                    return line.split("=", 1)[1].strip().strip('"' + "'")
+    except OSError:
+        pass
+    return default
+
+
+def bundle_images(version: str, db_version: str = "3.10") -> List[dict]:
+    """The five images inside aicyberauditbox-images-<v>.tar, and what each holds.
+
+    The contents list showed that tar as one line, which is true and hides
+    everything an operator wants to confirm is going: asked where the LLM, the
+    database and the Python libraries were, the honest answer was "inside that
+    one file". docker save writes all five into it, which is why a full bundle
+    is around 8 GB rather than the size of the code.
+    """
+    v = artifact_version(version)
+    return [
+        {"tag": "aicyberauditbox-app:%s" % v,
+         "holds": "the application and every Python library it needs"},
+        {"tag": "aicyberauditbox-llm:%s" % v,
+         "holds": "llama.cpp and the completion model weights (.gguf)"},
+        {"tag": "aicyberauditbox-llm-embed:%s" % v,
+         "holds": "the embedding model used for retrieval"},
+        {"tag": "aicyberauditbox-shakthidb:%s" % db_version,
+         "holds": "PostgreSQL, with the audit schema"},
+        {"tag": "redis:7-alpine",
+         "holds": "the queue and session cache"},
+    ]
+
+
 # -- are the weights actually in the image? -----------------------------------
 
 DEFAULT_MODELS = (

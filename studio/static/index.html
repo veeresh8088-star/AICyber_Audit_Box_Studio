@@ -182,7 +182,7 @@
 
 <script>
 let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto", VERSIONS = [];
-const PAGE_API = 5;   // must match web.API_VERSION; see the banner below
+const PAGE_API = 6;   // must match web.API_VERSION; see the banner below
 
 const SHAPE_MEANS = {
   auto:  "Compares the two versions and picks. Only src/ and config/ changed " +
@@ -430,7 +430,11 @@ async function doPlan(){
     · model check ${g.verify_models?"on":"OFF"}</span><br>
     <span class="muted">Nothing was built. This was a dry run.</span>
     ${(d.contents||[]).length ? `<div style="margin-top:8px"><b>The bundle will contain:</b>
-      <ul class="files">${d.contents.map(f=>`<li>${esc(f)}</li>`).join("")}</ul>
+      <ul class="files">${d.contents.map(f=>`<li>${esc(f)}${
+        (d.images && /images-.*\.tar$/.test(f))
+          ? `<ul class="files">${d.images.map(i =>
+              `<li>${esc(i.tag)} &mdash; ${esc(i.holds)}</li>`).join("")}</ul>`
+          : ""}</li>`).join("")}</ul>
       <span class="muted">Each of these is checked before publishing; a missing one stops the build.</span>
     </div>` : ""}</div>`;
 }

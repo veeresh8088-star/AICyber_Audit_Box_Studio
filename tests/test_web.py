@@ -173,3 +173,78 @@ def test_a_repository_with_no_tags_returns_nothing(tmp_path):
 
 def test_known_versions_of_a_non_repository_is_empty_not_a_crash(tmp_path):
     assert web.known_versions(str(tmp_path)) == []
+
+
+# -- customers, created and amended from the page ----------------------------
+# What a site is licensed for is the commercial decision this whole tool exists
+# to carry. Editing it by hand in YAML is how a customer ends up entitled to
+# something nobody decided to sell them.
+
+def _profiles_dir(tmp_path):
+    d = tmp_path / "profiles"
+    d.mkdir()
+    return str(d)
+
+
+def test_a_customer_can_be_created_and_reads_back(tmp_path):
+    d = _profiles_dir(tmp_path)
+    res = web.create_profile(d, {"customer": "Acme Bank", "expires": "2027-01-01",
+                                 "frameworks": ["ISO27001", "VAPT"], "seats": 5,
+                                 "physical_cores": 16, "ram_gb": 64})
+    assert res["created"] == "acme-bank.yaml", res
+    s = web.profile_summary(str(tmp_path / "profiles" / "acme-bank.yaml"))
+    assert s["valid"] and s["customer"] == "Acme Bank"
+    assert s["frameworks"] == ["ISO27001", "VAPT"]
+    assert s["seats"] == 5
+
+
+def test_a_licence_granting_nothing_is_refused(tmp_path):
+    """An installation licensed for no framework audits nothing."""
+    res = web.create_profile(_profiles_dir(tmp_path),
+                             {"customer": "X", "expires": "2027-01-01", "frameworks": []})
+    assert "at least one framework" in res["error"]
+
+
+def test_creating_never_overwrites_an_existing_customer(tmp_path):
+    d = _profiles_dir(tmp_path)
+    data = {"customer": "Acme", "expires": "2027-01-01", "frameworks": ["PQC"]}
+    assert "created" in web.create_profile(d, data)
+    again = web.create_profile(d, data)
+    assert "already exists" in again["error"]
+
+
+def test_an_invalid_profile_is_never_left_on_disk(tmp_path):
+    """The file is validated before it replaces anything."""
+    d = _profiles_dir(tmp_path)
+    res = web.create_profile(d, {"customer": "Bad", "expires": "not-a-date",
+                                 "frameworks": ["PQC"]})
+    assert "error" in res
+    assert os.listdir(d) == [], os.listdir(d)
+
+
+def test_entitlements_can_be_changed_after_the_fact(tmp_path):
+    d = _profiles_dir(tmp_path)
+    web.create_profile(d, {"customer": "Acme", "expires": "2027-01-01",
+                           "frameworks": ["ISO27001", "VAPT"]})
+    path = os.path.join(d, "acme.yaml")
+    res = web.set_section(path, "licence", {"frameworks": ["PQC"], "seats": 25})
+    assert res["changed"]["frameworks"] == ["PQC"]
+    s = web.profile_summary(path)
+    assert s["frameworks"] == ["PQC"] and s["seats"] == 25
+
+
+def test_build_gates_can_be_turned_off_deliberately(tmp_path):
+    d = _profiles_dir(tmp_path)
+    web.create_profile(d, {"customer": "Acme", "expires": "2027-01-01", "frameworks": ["PQC"]})
+    path = os.path.join(d, "acme.yaml")
+    web.set_section(path, "build", {"compile_source": False, "run_sca": False})
+    g = web.profile_summary(path)["gates"]
+    assert g["compile"] is False and g["sca"] is False
+    assert g["tests"] is True, "an untouched gate changed"
+
+
+def test_booleans_and_lists_are_written_as_yaml_not_python(tmp_path):
+    """True/['PQC'] would not parse back; true/[PQC] does."""
+    assert web._yaml_value(True) == "true"
+    assert web._yaml_value(False) == "false"
+    assert web._yaml_value(["PQC", "VAPT"]) == "[PQC, VAPT]"

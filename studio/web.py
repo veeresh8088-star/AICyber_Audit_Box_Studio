@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import traceback
 import uuid
@@ -106,6 +107,7 @@ def profile_summary(path: str) -> dict:
         "customer": p.licence.customer,
         "frameworks": [f.value for f in p.licence.frameworks],
         "expires": p.licence.expires.isoformat(),
+        "seats": p.licence.seats,
         "model": p.model.value,
         "cores": p.hardware.physical_cores, "ram_gb": p.hardware.ram_gb,
         "bundle": p.bundle.value,
@@ -121,6 +123,7 @@ def profile_summary(path: str) -> dict:
             "sca_severity": p.build.fail_on_sca_severity,
             "compile": p.build.compile_source, "encrypt": p.build.encrypt_bundle,
             "verify_models": p.build.verify_models,
+            "write_checksum": p.build.write_checksum,
         },
     }
 
@@ -130,40 +133,131 @@ def profile_summary(path: str) -> dict:
 _HW_FIELDS = ("physical_cores", "ram_gb", "ctx_per_request")
 
 
-def set_hardware(path: str, values: dict) -> dict:
-    """Rewrite only the hardware numbers, leaving the rest of the file alone.
+def _yaml_value(v) -> str:
+    """Render a value the way the profiles already write it."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(str(x) for x in v) + "]"
+    return str(v)
+
+
+def set_section(path: str, section: str, values: dict) -> dict:
+    """Rewrite named fields inside one top-level block, leaving the rest alone.
 
     A yaml.safe_load/safe_dump round trip would reformat the profile and drop
     every comment in it -- including the ones recording why this customer is
-    licensed for what they are. Those comments are the reason the profiles are
-    version-controlled, so the lines are edited where they sit.
+    licensed for what they are, which is the reason these files are
+    version-controlled at all. So the lines are edited where they sit, and an
+    inline comment on an edited line is carried across.
     """
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.readlines()
-    changed, in_hw = {}, False
+    changed, inside = {}, False
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("hardware:"):
-            in_hw = True
+        if stripped.startswith(section + ":"):
+            inside = True
             continue
-        if in_hw and stripped and not line[:1].isspace():
-            in_hw = False                      # a new top-level key ended the block
-        if not in_hw:
+        if inside and stripped and not line[:1].isspace():
+            inside = False                     # a new top-level key ended the block
+        if not inside:
             continue
-        for field in _HW_FIELDS:
-            if field in values and stripped.startswith(field + ":"):
-                indent = line[:len(line) - len(line.lstrip())]
-                comment = ""
-                if "#" in line:
-                    # Keep the text exactly, only normalising the gap before it.
-                    comment = "  # " + line.split("#", 1)[1].strip()
-                lines[i] = "%s%s: %s%s\n" % (indent, field, values[field], comment.rstrip())
-                changed[field] = values[field]
+        for field, value in values.items():
+            if not stripped.startswith(field + ":"):
+                continue
+            indent = line[:len(line) - len(line.lstrip())]
+            comment = ""
+            if "#" in line:
+                # Keep the text exactly, only normalising the gap before it.
+                comment = "  # " + line.split("#", 1)[1].strip()
+            lines[i] = "%s%s: %s%s\n" % (indent, field, _yaml_value(value), comment.rstrip())
+            changed[field] = value
     if not changed:
-        return {"error": "no hardware block found in the profile"}
+        return {"error": "nothing named %s was found under '%s:' in the profile"
+                         % (", ".join(values), section)}
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.writelines(lines)
     return {"changed": changed}
+
+
+def set_hardware(path: str, values: dict) -> dict:
+    """Kept as its own name: the hardware panel is the commonest edit."""
+    return set_section(path, "hardware", values)
+
+
+PROFILE_TEMPLATE = """# {customer} -- created in the release studio.
+# Version-controlled deliberately: a change to what this customer is licensed
+# for, or how much of their machine we use, becomes a reviewable commit.
+schema_version: 1
+
+licence:
+  customer: {customer}
+  expires: {expires}
+  frameworks: {frameworks}
+  seats: {seats}
+
+hardware:
+  physical_cores: {cores}
+  ram_gb: {ram}
+  ctx_per_request: {ctx}
+
+model: {model}
+
+bundle: auto
+
+runtime:
+  max_audits_per_auditor: 2
+  remediation_batch_size: 4
+  remediation_timeout_sec: 1800
+  ai_recommendations_default: true
+  jwt_expiry_hours: 8
+  locked: []                 # frameworks are never here; they are licence-controlled
+
+build:
+  compile_source: true
+  encrypt_bundle: true
+  run_tests: true
+  run_sca: true
+  fail_on_sca_severity: HIGH
+  verify_models: true
+  write_checksum: true
+"""
+
+
+def create_profile(directory: str, data: dict) -> dict:
+    """Write a new customer profile, validating it before it is saved.
+
+    Refuses to overwrite: a profile is what a customer is licensed for, and
+    silently replacing one is how a site ends up entitled to something nobody
+    decided to sell them.
+    """
+    name = re.sub(r"[^a-z0-9_-]+", "-", str(data.get("customer", "")).strip().lower()).strip("-")
+    if not name:
+        return {"error": "a customer name is required"}
+    path = os.path.join(directory, name + ".yaml")
+    if os.path.exists(path):
+        return {"error": "%s.yaml already exists -- edit it rather than replacing it" % name}
+    frameworks = [f for f in (data.get("frameworks") or []) if f]
+    if not frameworks:
+        return {"error": "a licence has to grant at least one framework"}
+    body = PROFILE_TEMPLATE.format(
+        customer=data.get("customer"), expires=data.get("expires"),
+        frameworks=_yaml_value(frameworks), seats=int(data.get("seats") or 1),
+        cores=int(data.get("physical_cores") or 8),
+        ram=data.get("ram_gb") or 32,
+        ctx=int(data.get("ctx_per_request") or 32768),
+        model=data.get("model") or "google_gemma-4-E4B-it-Q4_K_M.gguf")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(body)
+    try:
+        load_profile(tmp)                 # never leave an invalid profile behind
+    except Exception as exc:
+        os.remove(tmp)
+        return {"error": str(exc)[:400]}
+    os.replace(tmp, path)
+    return {"created": os.path.basename(path)}
 
 
 def what_if(cores: int, ram_gb: float, ctx: int, per_auditor: int = 2) -> dict:
@@ -274,6 +368,48 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("ctx", 32768), body.get("per_auditor", 2))})
             except Exception as exc:
                 self._json({"error": str(exc)[:200]})
+            return
+        if path == "/api/customer":
+            res = create_profile(self.profiles_dir, body)
+            if "created" in res:
+                res["summary"] = profile_summary(
+                    os.path.join(self.profiles_dir, res["created"]))
+            self._json(res)
+            return
+        if path == "/api/licence":
+            target = os.path.join(self.profiles_dir,
+                                  os.path.basename(body.get("profile", "")))
+            if not os.path.isfile(target):
+                self._json({"error": "no such profile"}, 404)
+                return
+            # Frameworks are the commercial decision this whole tool exists to
+            # carry, so an empty list is refused rather than written: a licence
+            # granting nothing produces an installation that audits nothing.
+            fields = {}
+            if "frameworks" in body:
+                fw = [f for f in (body.get("frameworks") or []) if f]
+                if not fw:
+                    self._json({"error": "a licence has to grant at least one framework"})
+                    return
+                fields["frameworks"] = fw
+            for k in ("customer", "expires", "seats"):
+                if k in body and str(body[k]).strip():
+                    fields[k] = body[k]
+            res = set_section(target, "licence", fields) if fields else {"changed": {}}
+            gates = {k: bool(body[k]) for k in
+                     ("compile_source", "encrypt_bundle", "run_tests", "run_sca",
+                      "verify_models", "write_checksum") if k in body}
+            if "fail_on_sca_severity" in body:
+                gates["fail_on_sca_severity"] = str(body["fail_on_sca_severity"]).upper()
+            if gates:
+                g = set_section(target, "build", gates)
+                res.setdefault("changed", {}).update(g.get("changed", {}))
+            # Re-read rather than echo: what comes back is what the file says.
+            summary = profile_summary(target)
+            if not summary.get("valid"):
+                res["error"] = "saved, but the profile no longer loads: %s" % summary.get("error")
+            res["summary"] = summary
+            self._json(res)
             return
         if path == "/api/hardware":
             target = os.path.join(self.profiles_dir,

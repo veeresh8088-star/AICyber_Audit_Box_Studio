@@ -73,6 +73,13 @@
        padding:10px 12px;margin-top:10px;white-space:pre-wrap}
   ul.files{margin:6px 0 0;padding-left:18px;font-family:ui-monospace,Consolas,monospace;
            font-size:12px;color:var(--muted)}
+  .card.add{border-style:dashed;display:flex;align-items:center;justify-content:center;
+            color:var(--muted);font-weight:700;min-height:96px}
+  .chk{display:inline-flex;align-items:center;gap:6px;margin-right:14px;font-size:13px;
+       color:var(--text);cursor:pointer}
+  .chk input{min-width:0;width:16px;height:16px;accent-color:var(--accent)}
+  .sub{font-size:11px;color:var(--muted);margin:10px 0 6px;text-transform:uppercase;
+       letter-spacing:.07em;font-weight:700}
 </style>
 </head>
 <body>
@@ -85,7 +92,42 @@
   <h2>Customer</h2>
   <div class="cards" id="profiles"><span class="muted">loading…</span></div>
 
+  <div class="hw hide" id="newcust">
+    <div class="sub">New customer</div>
+    <div class="row">
+      <div><label for="nc-name">Customer</label><input id="nc-name" placeholder="Acme Bank"></div>
+      <div><label for="nc-exp">Licence expires</label><input id="nc-exp" type="date"></div>
+      <div><label for="nc-seats">Seats</label><input id="nc-seats" type="number" value="5" min="1" style="min-width:90px"></div>
+      <div><label for="nc-cores">Cores</label><input id="nc-cores" type="number" value="8" min="1" style="min-width:90px"></div>
+      <div><label for="nc-ram">RAM (GB)</label><input id="nc-ram" type="number" value="32" min="1" style="min-width:90px"></div>
+    </div>
+    <div class="sub">Frameworks</div>
+    <div id="nc-fw"></div>
+    <div class="row" style="margin-top:12px">
+      <button onclick="createCustomer()">Create</button>
+      <button class="ghost" onclick="document.getElementById('newcust').classList.add('hide')">Cancel</button>
+      <span class="muted" id="nc-out"></span>
+    </div>
+  </div>
+
   <div id="rest" class="hide">
+    <h2>Licence &mdash; what this customer may audit</h2>
+    <div class="hw" id="lic">
+      <div class="row">
+        <div><label for="lic-name">Customer</label><input id="lic-name"></div>
+        <div><label for="lic-exp">Licence expires</label><input id="lic-exp" type="date"></div>
+        <div><label for="lic-seats">Seats</label><input id="lic-seats" type="number" min="1" style="min-width:90px"></div>
+      </div>
+      <div class="sub">Frameworks sold to this site</div>
+      <div id="lic-fw"></div>
+      <div class="sub">Build gates</div>
+      <div id="lic-gates"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="ghost" onclick="saveLicence()">Save licence &amp; gates</button>
+        <span class="muted" id="lic-out"></span>
+      </div>
+    </div>
+
     <h2>Machine this customer runs on</h2>
     <div class="hw">
       <div class="row">
@@ -200,8 +242,12 @@ async function load(){
   if (vs) vs.textContent = VERSIONS.length
     ? "Versions in the repository: " + VERSIONS.join(", ")
     : "No version tags in the repository yet — tag a release and the patch option becomes available.";
+  boxes("nc-fw", FRAMEWORKS.map(f => [f, f]), [], "ncfw-");
+  renderCards();
+}
+
+function renderCards(){
   const box = document.getElementById("profiles");
-  if (!PROFILES.length){ box.innerHTML = '<span class="muted">No profiles in profiles/.</span>'; return; }
   box.innerHTML = PROFILES.map((p,i) => p.valid ? `
     <div class="card" data-i="${i}" onclick="pick(${i})">
       <div class="cust">${esc(p.customer)}</div>
@@ -214,7 +260,9 @@ ${p.sizing.max_concurrent_audits} concurrent audits (limited by ${esc(p.sizing.l
     <div class="card bad">
       <div class="cust">${esc(p.file)}</div>
       <div class="kv">will not load: ${esc(p.error)}</div>
-    </div>`).join("");
+    </div>`).join("") +
+    `<div class="card add" onclick="document.getElementById('newcust').classList.remove('hide')">
+       + Add customer</div>`;
 }
 
 function pick(i){
@@ -226,7 +274,87 @@ function pick(i){
   document.getElementById("hw-cores").value = SELECTED.cores;
   document.getElementById("hw-ram").value = SELECTED.ram_gb;
   document.getElementById("hw-ctx").value = SELECTED.sizing.ctx_per_request;
+  fillLicence();
   resize();
+}
+
+const FRAMEWORKS = ["ISO27001", "VAPT", "PQC", "SOC2", "NIST", "PCIDSS", "HIPAA", "GDPR"];
+const GATES = [
+  ["compile_source",  "Compile to binaries (no readable source ships)"],
+  ["encrypt_bundle",  "Encrypt the bundle"],
+  ["run_tests",       "Run the product's tests"],
+  ["run_sca",         "Scan dependencies"],
+  ["verify_models",   "Check the model weights are in the image"],
+  ["write_checksum",  "Write a sha256 beside the artifact"],
+];
+
+function boxes(host, items, checked, prefix){
+  document.getElementById(host).innerHTML = items.map(([v, label]) =>
+    `<label class="chk"><input type="checkbox" id="${prefix}${v}"
+       ${checked.indexOf(v) >= 0 ? "checked" : ""}> ${esc(label)}</label>`).join("");
+}
+
+function fillLicence(){
+  document.getElementById("lic-name").value = SELECTED.customer;
+  document.getElementById("lic-exp").value = SELECTED.expires;
+  document.getElementById("lic-seats").value = SELECTED.seats || 1;
+  boxes("lic-fw", FRAMEWORKS.map(f => [f, f]), SELECTED.frameworks, "fw-");
+  const g = SELECTED.gates || {};
+  const on = [];
+  if (g.compile) on.push("compile_source");
+  if (g.encrypt) on.push("encrypt_bundle");
+  if (g.tests) on.push("run_tests");
+  if (g.sca) on.push("run_sca");
+  if (g.verify_models) on.push("verify_models");
+  if (g.write_checksum !== false) on.push("write_checksum");
+  boxes("lic-gates", GATES, on, "g-");
+  document.getElementById("lic-out").textContent = "";
+}
+
+function picked(prefix, items){
+  return items.map(i => Array.isArray(i) ? i[0] : i)
+              .filter(v => (document.getElementById(prefix + v) || {}).checked);
+}
+
+async function saveLicence(){
+  if (!SELECTED) return;
+  const body = { profile: SELECTED.file,
+    customer: document.getElementById("lic-name").value.trim(),
+    expires: document.getElementById("lic-exp").value,
+    seats: +document.getElementById("lic-seats").value,
+    frameworks: picked("fw-", FRAMEWORKS) };
+  GATES.forEach(([k]) => body[k] = (document.getElementById("g-" + k) || {}).checked);
+  const r = await fetch("/api/licence", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  const d = await r.json();
+  const out = document.getElementById("lic-out");
+  if (d.error){ out.textContent = d.error; return; }
+  if (d.summary && d.summary.valid){
+    const i = PROFILES.findIndex(x => x.file === SELECTED.file);
+    if (i >= 0){ PROFILES[i] = d.summary; SELECTED = d.summary; }
+    renderCards();
+    document.querySelectorAll(".card").forEach(c =>
+      c.classList.toggle("sel", c.dataset.i == String(i)));
+  }
+  out.textContent = "saved: " + Object.keys(d.changed || {}).join(", ");
+}
+
+async function createCustomer(){
+  const body = {
+    customer: document.getElementById("nc-name").value.trim(),
+    expires: document.getElementById("nc-exp").value,
+    seats: +document.getElementById("nc-seats").value,
+    physical_cores: +document.getElementById("nc-cores").value,
+    ram_gb: +document.getElementById("nc-ram").value,
+    frameworks: picked("ncfw-", FRAMEWORKS) };
+  const r = await fetch("/api/customer", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  const d = await r.json();
+  const out = document.getElementById("nc-out");
+  if (d.error){ out.textContent = d.error; return; }
+  out.textContent = "created " + d.created;
+  await load();
+  document.getElementById("newcust").classList.add("hide");
 }
 
 function payload(){

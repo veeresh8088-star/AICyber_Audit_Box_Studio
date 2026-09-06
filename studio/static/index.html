@@ -183,7 +183,7 @@
 
 <script>
 let PROFILES = [], SELECTED = null, POLL = null, SHAPE = "auto", VERSIONS = [];
-const PAGE_API = 7;
+const PAGE_API = 8;
 let OUT_DIR = "";   // must match web.API_VERSION; see the banner below
 
 const SHAPE_MEANS = {
@@ -192,10 +192,12 @@ const SHAPE_MEANS = {
          "a model -- and it builds everything, because a patch cannot rebuild " +
          "those layers on the customer's machine.",
   patch: "Rebuilds only the application layer on top of the images the customer " +
-         "already has. About 2 GB. Their database, evidence and past audits are " +
-         "untouched. It will be refused if anything beneath the app layer changed.",
-  full:  "Every image, including the model weights. About 8 GB. Needed for a " +
-         "first install, or after a dependency, Dockerfile or model change.",
+         "already has, so it carries no model weights. Their database, evidence " +
+         "and past audits are untouched. Refused if anything beneath the app " +
+         "layer changed.",
+  full:  "Every image, including the model weights. Needed for a first install, " +
+         "or after a dependency, Dockerfile or model change. The dry run measures " +
+         "the actual size rather than guessing it.",
 };
 
 function setShape(s){
@@ -441,6 +443,8 @@ async function doPlan(){
               `<li>${esc(i.tag)} &mdash; ${esc(i.holds)}</li>`).join("")}</ul>`
           : ""}</li>`).join("")}</ul>
       <span class="muted">Each of these is checked before publishing; a missing one stops the build.</span>
+      ${d.size_gb ? `<div style="margin-top:6px"><b>About ${d.size_gb} GB</b>
+        <span class="muted">measured from the images on this machine</span></div>` : ""}
       ${OUT_DIR ? `<div class="mono" style="margin-top:6px">written to ${esc(OUT_DIR)}\v${
         esc(String(document.getElementById("version").value.trim()).replace(/^v/, ""))}</div>` : ""}
     </div>` : ""}</div>`;

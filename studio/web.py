@@ -39,7 +39,7 @@ from studio.sizing import size_for_profile
 # process loaded at start. That combination shows an operator new buttons wired
 # to endpoints that answer "not found", which looks like a broken feature rather
 # than a stale server. The page checks this and says which it is.
-API_VERSION = 7
+API_VERSION = 8
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -538,7 +538,14 @@ class Handler(BaseHTTPRequestHandler):
         if shape != "patch":
             # One line of that list is a docker save of five images and holds
             # everything -- the libraries, the model weights, the database.
-            out["images"] = bundle_images(version, product_db_version(self.repo))
+            imgs = bundle_images(version, product_db_version(self.repo))
+            out["images"] = imgs
+            # Measured, not stated. The page used to claim "about 8 GB", which
+            # was true before the 12B model was added and is not now.
+            from studio.executors import estimate_bundle_gb
+            gb = estimate_bundle_gb([i["tag"] for i in imgs])
+            if gb:
+                out["size_gb"] = gb
         return out
 
     def _build(self, body: dict) -> dict:

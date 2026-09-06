@@ -352,3 +352,51 @@ def test_a_patch_base_also_uses_the_filename_form(monkeypatch, tmp_path):
     monkeypatch.setattr(ex, "_run", lambda cmd, **k: (seen.update(cmd=cmd), (0, "x"))[1])
     ex.bundle_builder(str(repo), str(tmp_path / "o"), "v3.25", patch_from="v3.24")("patch")
     assert "3.24" in seen["cmd"] and "v3.24" not in seen["cmd"], seen["cmd"]
+
+
+# -- how big it really is ----------------------------------------------------
+# The page claimed "about 8 GB", which was true before the 12B model was added
+# and is not now: the images measure 20.5 GB. Two things made the obvious
+# arithmetic wrong. docker images double counts under the containerd store --
+# it reports 37.3GB for an image docker inspect puts at 18.05GB -- and the llm
+# and llm-embed tags share all twenty layers, being one image serving a
+# different model, so adding their sizes doubles the largest thing in the bundle.
+
+def test_no_size_is_reported_without_docker(monkeypatch):
+    monkeypatch.setattr(ex, "tool_available", lambda n: False)
+    assert ex.estimate_bundle_gb(["anything"]) is None
+
+
+def test_a_partial_measurement_is_refused(monkeypatch):
+    """Most tags carry the version being built, which does not exist yet.
+
+    Measuring the two that resolve reported 0.2 GB for a twenty gigabyte
+    bundle, which is worse than reporting nothing.
+    """
+    def fake(cmd, **kw):
+        tag = cmd[2]
+        if tag == "redis:7-alpine":
+            return 0, "sha256:aaa" if "Layers" in cmd[-1] else "20000000"
+        return 1, "No such image"
+    monkeypatch.setattr(ex, "tool_available", lambda n: True)
+    monkeypatch.setattr(ex, "_run", fake)
+    assert ex.estimate_bundle_gb(["app:3.25", "redis:7-alpine"]) is None
+
+
+def test_shared_layers_are_counted_once(monkeypatch):
+    """llm and llm-embed are one image with two tags."""
+    calls = {"n": 0}
+
+    def fake(cmd, **kw):
+        calls["n"] += 1
+        wants_layers = "Layers" in cmd[-1]
+        if cmd[2].startswith("app"):
+            return (0, "sha256:app1 sha256:app2") if wants_layers else (0, "2000000000")
+        # both llm tags report the identical layer set
+        return (0, "sha256:l1 sha256:l2") if wants_layers else (0, "18000000000")
+
+    monkeypatch.setattr(ex, "tool_available", lambda n: True)
+    monkeypatch.setattr(ex, "_run", fake)
+    total = ex.estimate_bundle_gb(["app:1", "llm:1", "llm-embed:1"])
+    # 2 + 18, not 2 + 18 + 18
+    assert total == 20.0, total

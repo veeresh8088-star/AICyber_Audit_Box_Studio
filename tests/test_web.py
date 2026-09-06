@@ -279,7 +279,11 @@ def test_every_bundle_shape_is_explained_on_the_page():
     """"Patch only" tells an operator nothing about what is patched."""
     with open(web.PAGE, encoding="utf-8") as fh:
         html = fh.read()
-    for word in ("application layer", "model weights", "2 GB", "8 GB"):
+    # Sizes are no longer asserted here: they were hardcoded as "2 GB" and
+    # "8 GB", and the 8 stopped being true the day the 12B model was added. The
+    # dry run measures the images instead, so the text explains what is in each
+    # shape and the number comes from the machine.
+    for word in ("application layer", "model weights", "no model weights"):
         assert word in html, "the shape explanation lost: %s" % word
     # The buttons say what happens, not what the code calls it.
     assert "App code only" in html and "Everything" in html

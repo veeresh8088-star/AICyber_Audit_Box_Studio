@@ -443,6 +443,53 @@ def bundle_images(version: str, db_version: str = "3.10") -> List[dict]:
     ]
 
 
+def estimate_bundle_gb(tags: List[str]) -> Optional[float]:
+    """How big the images tar will actually be, measured rather than assumed.
+
+    Sums each image's layers ONCE across all of them. Two things make the
+    obvious arithmetic wrong:
+
+      docker images reports a size that double counts under the containerd
+      store -- it showed 37.3GB for an image docker inspect puts at 18.05GB;
+
+      aicyberauditbox-llm and -llm-embed share all twenty layers. They are one
+      image with two tags, and docker save writes those layers once, so adding
+      the two sizes together doubles the largest thing in the bundle.
+
+    Returns None when docker cannot be asked, because a guess presented as a
+    measurement is worse than saying nothing.
+    """
+    if not tool_available("docker"):
+        return None
+    seen, total, found = set(), 0, 0
+    for tag in tags:
+        code, out = _run(["docker", "inspect", tag, "--format",
+                          "{{range .RootFS.Layers}}{{.}} {{end}}"], timeout=120)
+        if code != 0:
+            continue
+        found += 1
+        code2, sizes = _run(["docker", "inspect", tag, "--format", "{{.Size}}"], timeout=120)
+        layers = [l for l in out.split() if l]
+        if not layers or code2 != 0:
+            continue
+        # Whole-image size counted once per distinct layer set.
+        key = tuple(layers)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            total += int(sizes.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            continue
+    # Most of these tags carry the version being built, which has not been built
+    # yet the first time anyone plans it. Measuring the two or three that happen
+    # to resolve and calling the answer the bundle size reported 0.2 GB for a
+    # bundle that is actually twenty, which is worse than reporting nothing.
+    if found < len(tags):
+        return None
+    return round(total / 1e9, 1) if total else None
+
+
 # -- are the weights actually in the image? -----------------------------------
 
 DEFAULT_MODELS = (
